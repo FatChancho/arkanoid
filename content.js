@@ -1,386 +1,1185 @@
+
 (() => {
-  // Prevent duplicate content-script instances after extension reloads.
+  // Evita instancias duplicadas.
   if (window.__webBreakout?.cleanup) {
     window.__webBreakout.cleanup();
   }
 
   const CONFIG = {
-    minWidth: 36,
-    minHeight: 24,
     maxBlocks: 70,
+    minWidth: 24,
+    minHeight: 18,
+    maxElementArea: 0.88,
+    blockResistance: 2,
+
     paddleWidth: 110,
     paddleHeight: 12,
-    paddleBottom: 34,
-    ballRadius: 8,
+    paddleBottom: 28,
+
+    ballRadius: 7,
     ballSpeed: 10,
-    maxParticles: 180,
-    selectors: [
-      'img', 'picture', 'button', 'input', 'textarea', 'select',
-      'a', 'article', 'section', 'main > div',
-      'h1', 'h2', 'h3', 'p', 'li'
-    ].join(',')
+
+    particlesPerHit: 8,
+    maxParticles: 120,
   };
 
-  let active = false;
-  let gameOver = false;
-  let animationId = 0;
-  let canvas = null;
-  let ctx = null;
-  let blocks = [];
-  let particles = [];
-  let score = 0;
-  let lives = 3;
-  let paddle = null;
-  let ball = null;
-  let lastTime = 0;
-  let lastMouseX = window.innerWidth / 2;
+  const SELECTORS = [
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'p', 'li', 'blockquote', 'pre', 'code',
+    'img', 'svg', 'picture', 'video', 'figure', 'canvas',
+    'button', 'input', 'textarea', 'select',
+    'a, [role="link"]',
+    'a[href]', 'summary', 'article', 'section', 'aside',
+    'td', 'th', 'tr',
+    '[role="button"]', '[role="img"]', '[role="listitem"]',
+    '[class*="card"]', '[class*="tile"]', '[class*="product"]',
+    '[class*="item"]', '[class*="thumbnail"]', '[class*="banner"]',
+    'img','svg','svg image','[role="img"]','[aria-label]','[title]',
+  ];
 
-  function resistanceFor(el) {
-    const tag = el.tagName.toLowerCase();
-    const cls = typeof el.className === 'string' ? el.className.toLowerCase() : '';
-    if (/card|container|section|article|banner|hero/.test(cls) || ['article', 'section'].includes(tag)) return 3;
-    if (['img', 'picture', 'video'].includes(tag) || /image|photo|media/.test(cls)) return 2;
-    return 1;
+  const state = {
+    active: false,
+    gameOver: false,
+    lives: 3,
+
+    canvas: null,
+    ctx: null,
+    animationFrame: null,
+    lastTime: 0,
+
+    blocks: [],
+    particles: [],
+
+    score: 0,
+    paddleX: 0,
+    ball: null,
+
+    totalBlocks: 0,
+    destroyedBlocks: 0,
+
+    keys: {
+      left: false,
+      right: false,
+    },
+
+    mouseX: null,
+    listeners: [],
+    originalVisibility: new Map(),
+  };
+
+  // --------------------------------------------------
+  // Mensajes a popup.js
+  // --------------------------------------------------
+
+  function sendStatus(active, message = '') {
+    try {
+      chrome.runtime.sendMessage({
+        type: 'gameStatus',
+        active,
+        message,
+        score: state.score,
+      }).catch(() => {});
+    } catch {
+      // La extensión puede haberse recargado.
+    }
+  }
+
+  function addListener(target, event, handler, options) {
+    target.addEventListener(event, handler, options);
+
+    state.listeners.push(() => {
+      target.removeEventListener(event, handler, options);
+    });
+  }
+
+  // --------------------------------------------------
+  // Restauración de los elementos de la página
+  // --------------------------------------------------
+
+  function restoreVisibility() {
+    for (const [element, original] of state.originalVisibility) {
+      if (!element?.style) continue;
+
+      if (original.hadInlineVisibility) {
+        element.style.setProperty(
+          'visibility',
+          original.value,
+          original.priority,
+        );
+      } else {
+        element.style.removeProperty('visibility');
+      }
+    }
+
+    state.originalVisibility.clear();
+  }
+
+  function hideElement(element) {
+    if (!element?.style || !element.isConnected) return;
+
+    if (!state.originalVisibility.has(element)) {
+      state.originalVisibility.set(element, {
+        hadInlineVisibility:
+          element.style.getPropertyValue('visibility') !== '',
+        value: element.style.getPropertyValue('visibility'),
+        priority: element.style.getPropertyPriority('visibility'),
+      });
+    }
+
+    element.style.setProperty('visibility', 'hidden', 'important');
+  }
+
+  // --------------------------------------------------
+  // Detección de bloques invisibles
+  // --------------------------------------------------
+
+  function getElementArea(rect) {
+    return Math.max(0, rect.width) * Math.max(0, rect.height);
+  }
+
+  function isVisibleCandidate(element) {
+    if (
+      !(element instanceof HTMLElement) &&
+      !(element instanceof SVGElement)
+    ) {
+      return false;
+    }
+
+    if (!element.isConnected) return false;
+
+    if (element.closest(
+      'script, style, noscript, template, head, meta, link, title'
+    )) {
+      return false;
+    }
+
+    // No detectar elementos pertenecientes al propio juego.
+    if (element.closest('#webbreakout-canvas')) return false;
+
+    const style = getComputedStyle(element);
+
+    if (
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      style.visibility === 'collapse' ||
+      Number(style.opacity) === 0
+    ) {
+      return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+
+    if (
+      rect.width < CONFIG.minWidth ||
+      rect.height < CONFIG.minHeight ||
+      rect.bottom <= 0 ||
+      rect.right <= 0 ||
+      rect.top >= window.innerHeight ||
+      rect.left >= window.innerWidth
+    ) {
+      return false;
+    }
+
+    const viewportArea = window.innerWidth * window.innerHeight;
+
+    if (getElementArea(rect) > viewportArea * CONFIG.maxElementArea) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function getBlockTarget(element) {
+    if (!element.matches('input, textarea, select')) {
+      return element;
+    }
+
+    let parent = element.parentElement;
+
+    for (let i = 0; parent && i < 5; i++, parent = parent.parentElement) {
+      const rect = parent.getBoundingClientRect();
+
+      // Evitar seleccionar contenedores demasiado grandes.
+      if (
+        rect.width < 120 ||
+        rect.height < 30 ||
+        rect.width > Math.min(window.innerWidth * 0.8, 900) ||
+        rect.height > 160
+      ) {
+        continue;
+      }
+
+      const style = window.getComputedStyle(parent);
+
+      const hasBorder = ['Top', 'Right', 'Bottom', 'Left'].some(side => {
+        const width = parseFloat(style[`border${side}Width`]);
+        const borderStyle = style[`border${side}Style`];
+        const color = style[`border${side}Color`];
+
+        return (
+          width > 0 &&
+          borderStyle !== 'none' &&
+          color !== 'rgba(0, 0, 0, 0)' &&
+          !color.endsWith(', 0)')
+        );
+      });
+
+      const hasShadow = style.boxShadow !== 'none';
+
+      if (hasBorder || hasShadow) {
+        return parent;
+      }
+    }
+
+    // Si no encuentra un contenedor visual, conserva el elemento original.
+    return element;
   }
 
   function detectBlocks() {
-    const candidates = Array.from(document.querySelectorAll(CONFIG.selectors));
-    const viewportWidth = window.innerWidth;
-    const viewportHeight = window.innerHeight;
-    const found = [];
-    const seenRects = new Set();
+    const candidates = new Set();
 
-    for (const el of candidates) {
-      if (!el.isConnected || canvas?.contains(el)) continue;
-      const style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) continue;
-      const rect = el.getBoundingClientRect();
-      if (rect.width < CONFIG.minWidth || rect.height < CONFIG.minHeight) continue;
-      if (rect.bottom <= 0 || rect.right <= 0 || rect.top >= viewportHeight || rect.left >= viewportWidth) continue;
-      if (style.position === 'fixed' && Number(style.zIndex) > 1000) continue;
+    // Detectar elementos que coincidan con los selectores.
+    try {
+      document
+        .querySelectorAll(SELECTORS.join(','))
+        .forEach((element) => {
+          const target = getBlockTarget(element);
 
-      const x = Math.max(0, rect.left);
-      const y = Math.max(0, rect.top);
-      const width = Math.min(viewportWidth, rect.right) - x;
-      const height = Math.min(viewportHeight, rect.bottom) - y;
-      if (width < CONFIG.minWidth || height < CONFIG.minHeight) continue;
-
-      // Avoid identical boxes and overly large page wrappers swallowing the whole page.
-      if (width > viewportWidth * 0.96 && height > viewportHeight * 0.8) continue;
-      const key = [Math.round(x), Math.round(y), Math.round(width), Math.round(height)].join(':');
-      if (seenRects.has(key)) continue;
-      seenRects.add(key);
-
-      found.push({
-        x, y, width, height,
-        type: el.tagName.toLowerCase(),
-        resistance: resistanceFor(el),
-        maxResistance: resistanceFor(el),
-        alive: true
-      });
+          if (
+            isVisibleCandidate(target) &&
+            !target.closest('#webbreakout-canvas')
+          ) {
+            candidates.add(target);
+          }
+        });
+    } catch (error) {
+      console.warn('WebBreakout: error al detectar elementos:', error);
     }
 
-    // Prefer larger semantic elements and cap the number for performance.
-    found.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+    // Medir los candidatos detectados.
+    const measured = [...candidates].map((element) => {
+      const rect = element.getBoundingClientRect();
+
+      return {
+        element,
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height,
+        area: getElementArea(rect),
+      };
+    });
+
+    // Priorizar elementos pequeños para evitar seleccionar
+    // contenedores grandes que cubran otros elementos.
+    measured.sort((a, b) => a.area - b.area);
+
     const selected = [];
-    for (const block of found) {
-      // Skip a small block almost completely covered by an already selected block.
-      const covered = selected.some(other => {
-        const overlapW = Math.max(0, Math.min(block.x + block.width, other.x + other.width) - Math.max(block.x, other.x));
-        const overlapH = Math.max(0, Math.min(block.y + block.height, other.y + other.height) - Math.max(block.y, other.y));
-        return overlapW * overlapH > block.width * block.height * 0.88;
-      });
-      if (!covered) selected.push(block);
+
+    for (const candidate of measured) {
       if (selected.length >= CONFIG.maxBlocks) break;
+
+      const rect = candidate.element.getBoundingClientRect();
+      const candidateArea = getElementArea(rect);
+
+      if (candidateArea <= 0) continue;
+
+      // Evitar bloques que estén prácticamente cubiertos
+      // por otro bloque seleccionado.
+      const coveredByExisting = selected.some((block) => {
+        const other = block.element.getBoundingClientRect();
+
+        const left = Math.max(rect.left, other.left);
+        const top = Math.max(rect.top, other.top);
+        const right = Math.min(rect.right, other.right);
+        const bottom = Math.min(rect.bottom, other.bottom);
+
+        if (right <= left || bottom <= top) return false;
+
+        const overlapArea = (right - left) * (bottom - top);
+
+        return overlapArea / candidateArea > 0.88;
+      });
+
+      if (coveredByExisting) continue;
+
+      selected.push({
+        element: candidate.element,
+        x: candidate.x,
+        y: candidate.y,
+        width: candidate.width,
+        height: candidate.height,
+        resistance: CONFIG.blockResistance,
+        maxResistance: CONFIG.blockResistance,
+        alive: true,
+      });
     }
+
     return selected;
   }
 
-  function createParticles(block) {
-    const count = 10;
-    for (let i = 0; i < count && particles.length < CONFIG.maxParticles; i++) {
+  // --------------------------------------------------
+  // Canvas
+  // --------------------------------------------------
+
+  function createCanvas() {
+    const canvas = document.createElement('canvas');
+
+    canvas.id = 'webbreakout-canvas';
+    canvas.setAttribute('aria-hidden', 'true');
+
+    Object.assign(canvas.style, {
+      position: 'fixed',
+      inset: '0',
+      width: '100vw',
+      height: '100vh',
+      zIndex: '2147483647',
+      pointerEvents: 'none',
+      background: 'transparent',
+    });
+
+    document.documentElement.appendChild(canvas);
+
+    state.canvas = canvas;
+    state.ctx = canvas.getContext('2d');
+
+    resizeCanvas();
+  }
+
+  function resizeCanvas() {
+    if (!state.canvas || !state.ctx) return;
+
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+
+    state.canvas.width = Math.round(window.innerWidth * dpr);
+    state.canvas.height = Math.round(window.innerHeight * dpr);
+
+    state.canvas.style.width = `${window.innerWidth}px`;
+    state.canvas.style.height = `${window.innerHeight}px`;
+
+    state.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    state.paddleX = Math.max(
+      0,
+      Math.min(
+        state.paddleX,
+        window.innerWidth - CONFIG.paddleWidth,
+      ),
+    );
+  }
+
+  // --------------------------------------------------
+  // Pelota y partículas
+  // --------------------------------------------------
+
+  function createBall() {
+    return {
+      x: window.innerWidth / 2,
+      y: window.innerHeight * 0.65,
+      vx: CONFIG.ballSpeed * 0.65,
+      vy: -CONFIG.ballSpeed,
+      radius: CONFIG.ballRadius,
+    };
+  }
+
+  let audioContext = null;
+
+function playHitSound(destroyed = false) {
+  try {
+    const AudioContextClass =
+      window.AudioContext || window.webkitAudioContext;
+
+    if (!AudioContextClass) return;
+
+    if (!audioContext || audioContext.state === 'closed') {
+      audioContext = new AudioContextClass();
+    }
+
+    if (audioContext.state === 'suspended') {
+      audioContext.resume().catch(() => {});
+    }
+
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    const now = audioContext.currentTime;
+
+    oscillator.type = destroyed ? 'square' : 'sine';
+    oscillator.frequency.setValueAtTime(
+      destroyed ? 880 : 440,
+      now,
+    );
+
+    oscillator.frequency.exponentialRampToValueAtTime(
+      destroyed ? 220 : 300,
+      now + 0.08,
+    );
+
+    gain.gain.setValueAtTime(0.12, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+
+    oscillator.start(now);
+    oscillator.stop(now + 0.09);
+  } catch (error) {
+    console.debug('WebBreakout: no se pudo reproducir el sonido.', error);
+  }
+}
+
+  function createParticles(x, y, color = '#ffcf5c') {
+    for (let i = 0; i < CONFIG.particlesPerHit; i++) {
+      if (state.particles.length >= CONFIG.maxParticles) {
+        state.particles.shift();
+      }
+
       const angle = Math.random() * Math.PI * 2;
       const speed = 1 + Math.random() * 3;
-      particles.push({
-        x: block.x + block.width / 2,
-        y: block.y + block.height / 2,
+
+      state.particles.push({
+        x,
+        y,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
-        size: 2 + Math.random() * 3,
         life: 1,
-        color: colorFor(block.type)
+        size: 2 + Math.random() * 3,
+        color,
       });
     }
   }
 
-  function colorFor(type) {
-    if (['img', 'picture', 'video'].includes(type)) return '#e74c3c';
-    if (['button', 'input', 'textarea', 'select'].includes(type)) return '#f39c12';
-    if (['h1', 'h2', 'h3', 'p', 'li'].includes(type)) return '#1abc9c';
-    if (['article', 'section'].includes(type)) return '#2ecc71';
-    return '#3498db';
-  }
+  function updateParticles(delta) {
+    const factor = delta / 16.67;
 
-  function resetBall() {
-    if (!paddle || !canvas) return;
-    ball = {
-      x: paddle.x + paddle.width / 2,
-      y: paddle.y - CONFIG.ballRadius - 2,
-      vx: (Math.random() < 0.5 ? -1 : 1) * CONFIG.ballSpeed * 0.65,
-      vy: -CONFIG.ballSpeed,
-      radius: CONFIG.ballRadius
-    };
-  }
-
-  function resizeCanvas() {
-    if (!canvas) return;
-    const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
-    canvas.width = Math.round(window.innerWidth * dpr);
-    canvas.height = Math.round(window.innerHeight * dpr);
-    canvas.style.width = `${window.innerWidth}px`;
-    canvas.style.height = `${window.innerHeight}px`;
-    ctx = canvas.getContext('2d');
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (paddle) {
-      paddle.y = window.innerHeight - CONFIG.paddleBottom - CONFIG.paddleHeight;
-      paddle.x = Math.min(Math.max(0, paddle.x), window.innerWidth - paddle.width);
+    for (const particle of state.particles) {
+      particle.x += particle.vx * factor;
+      particle.y += particle.vy * factor;
+      particle.vy += 0.04 * factor;
+      particle.life -= 0.025 * factor;
     }
-    blocks = detectBlocks();
-    if (paddle) resetBall();
+
+    state.particles = state.particles.filter(
+      (particle) => particle.life > 0,
+    );
   }
 
-  function movePaddle(event) {
-    if (!active || !paddle) return;
-    lastMouseX = event.clientX;
-    paddle.x = Math.max(0, Math.min(window.innerWidth - paddle.width, lastMouseX - paddle.width / 2));
+  // --------------------------------------------------
+  // Colisiones
+  // --------------------------------------------------
+
+  function circleIntersectsRect(ball, rect) {
+    const closestX = Math.max(
+      rect.left,
+      Math.min(ball.x, rect.right),
+    );
+
+    const closestY = Math.max(
+      rect.top,
+      Math.min(ball.y, rect.bottom),
+    );
+
+    const dx = ball.x - closestX;
+    const dy = ball.y - closestY;
+
+    return dx * dx + dy * dy <= ball.radius * ball.radius;
   }
 
-  function overlapsCircleRect(circle, rect) {
-    const nearestX = Math.max(rect.x, Math.min(circle.x, rect.x + rect.width));
-    const nearestY = Math.max(rect.y, Math.min(circle.y, rect.y + rect.height));
-    const dx = circle.x - nearestX;
-    const dy = circle.y - nearestY;
-    return dx * dx + dy * dy < circle.radius * circle.radius;
+  function updateBlocks() {
+    for (const block of state.blocks) {
+      if (!block.alive || !block.element?.isConnected) continue;
+
+      const rect = block.element.getBoundingClientRect();
+
+      block.x = rect.left;
+      block.y = rect.top;
+      block.width = rect.width;
+      block.height = rect.height;
+    }
   }
 
-  function updateBall() {
-    if (!ball || !paddle) return;
-    const previousX = ball.x;
-    const previousY = ball.y;
-    ball.x += ball.vx;
-    ball.y += ball.vy;
+  function hitBlock(block) {
+    if (!block.alive) return;
 
+    block.resistance--;
+
+    if (block.resistance <= 0) {
+      state.destroyedBlocks++;
+      block.alive = false;
+
+      hideElement(block.element);
+
+      state.score += 10;
+
+      // Animación de destrucción: amarillo.
+      createParticles(
+        block.x + block.width / 2,
+        block.y + block.height / 2,
+        '#ffcf5c',
+      );
+
+      playHitSound(true);
+    }
+  }
+
+  function updateBall(delta) {
+    if (state.gameOver || !state.ball) return;
+
+    const ball = state.ball;
+    const factor = Math.min(delta / 16.67, 2);
+
+    ball.x += ball.vx * factor;
+    ball.y += ball.vy * factor;
+
+    // Paredes laterales.
     if (ball.x - ball.radius <= 0) {
       ball.x = ball.radius;
       ball.vx = Math.abs(ball.vx);
-    } else if (ball.x + ball.radius >= window.innerWidth) {
+    }
+
+    if (ball.x + ball.radius >= window.innerWidth) {
       ball.x = window.innerWidth - ball.radius;
       ball.vx = -Math.abs(ball.vx);
     }
+
+    // Techo.
     if (ball.y - ball.radius <= 0) {
       ball.y = ball.radius;
       ball.vy = Math.abs(ball.vy);
     }
 
-    // Paddle collision only while travelling downward, preventing repeated bounce frames.
-    if (ball.vy > 0 && overlapsCircleRect(ball, paddle) && previousY + ball.radius <= paddle.y + 8) {
-      ball.y = paddle.y - ball.radius;
-      const hit = (ball.x - (paddle.x + paddle.width / 2)) / (paddle.width / 2);
-      const speed = Math.max(CONFIG.ballSpeed, Math.hypot(ball.vx, ball.vy));
-      ball.vx = hit * speed * 0.85;
-      ball.vy = -Math.sqrt(Math.max(4, speed * speed - ball.vx * ball.vx));
+    // Pala.
+    const paddleY =
+      window.innerHeight -
+      CONFIG.paddleBottom -
+      CONFIG.paddleHeight;
+
+    const paddleRect = {
+      left: state.paddleX,
+      right: state.paddleX + CONFIG.paddleWidth,
+      top: paddleY,
+      bottom: paddleY + CONFIG.paddleHeight,
+    };
+
+    if (
+      ball.vy > 0 &&
+      circleIntersectsRect(ball, paddleRect)
+    ) {
+      ball.y = paddleY - ball.radius;
+
+      const hitPosition =
+        (ball.x - (state.paddleX + CONFIG.paddleWidth / 2)) /
+        (CONFIG.paddleWidth / 2);
+
+      ball.vx = hitPosition * CONFIG.ballSpeed;
+
+      ball.vy = -Math.max(
+        2.5,
+        Math.sqrt(
+          Math.max(
+            0,
+            CONFIG.ballSpeed ** 2 - ball.vx ** 2,
+          ),
+        ),
+      );
     }
 
-    for (const block of blocks) {
-      if (!block.alive || !overlapsCircleRect(ball, block)) continue;
-      block.resistance -= 1;
-      if (block.resistance <= 0) {
+    // Bloques invisibles del DOM.
+    for (const block of state.blocks) {
+      if (!block.alive) continue;
+
+      if (!block.element?.isConnected) {
         block.alive = false;
-        score += 10;
-        createParticles(block);
+        continue;
       }
-      // Choose the collision axis from the previous position.
-      if (previousX + ball.radius <= block.x || previousX - ball.radius >= block.x + block.width) {
+
+      const rect = block.element.getBoundingClientRect();
+
+      if (
+        rect.width <= 0 ||
+        rect.height <= 0 ||
+        rect.bottom <= 0 ||
+        rect.top >= window.innerHeight ||
+        rect.right <= 0 ||
+        rect.left >= window.innerWidth
+      ) {
+        continue;
+      }
+
+      block.x = rect.left;
+      block.y = rect.top;
+      block.width = rect.width;
+      block.height = rect.height;
+
+      if (!circleIntersectsRect(ball, rect)) continue;
+
+const now = performance.now();
+const canDamage =
+  now - (block.lastHitAt ?? -Infinity) >= 250;
+
+if (canDamage) {
+  block.lastHitAt = now;
+
+  // Animación de impacto: azul eléctrico.
+  createParticles(
+    ball.x,
+    ball.y,
+    '#35d9ff',
+  );
+
+  playHitSound();
+
+  hitBlock(block);
+}
+
+      const overlapLeft = Math.abs(
+        ball.x + ball.radius - rect.left,
+      );
+
+      const overlapRight = Math.abs(
+        rect.right - (ball.x - ball.radius),
+      );
+
+      const overlapTop = Math.abs(
+        ball.y + ball.radius - rect.top,
+      );
+
+      const overlapBottom = Math.abs(
+        rect.bottom - (ball.y - ball.radius),
+      );
+
+      const horizontal = Math.min(overlapLeft, overlapRight);
+      const vertical = Math.min(overlapTop, overlapBottom);
+
+      if (horizontal < vertical) {
         ball.vx *= -1;
       } else {
         ball.vy *= -1;
       }
+
+      // Un impacto por frame.
       break;
     }
 
+    // Game Over: no reiniciar la pelota automáticamente.
     if (ball.y - ball.radius > window.innerHeight) {
-      lives -= 1;
-      if (lives <= 0) {
-        gameOver = true;
+      state.lives--;
+
+      state.keys.left = false;
+      state.keys.right = false;
+      state.mouseX = null;
+
+      if (state.lives <= 0) {
+        state.lives = 0;
+        state.gameOver = true;
+        sendStatus(true, 'Game Over');
       } else {
-        resetBall();
+        // Nueva pelota, conservando la puntuación y los bloques destruidos.
+        state.ball = createBall();
+        state.ball.y = window.innerHeight * 0.65;
+        state.ball.vy = -CONFIG.ballSpeed;
       }
     }
-
-    if (blocks.every(block => !block.alive)) gameOver = true;
   }
 
-  function updateParticles(delta) {
-    const factor = Math.min(delta / 16.67, 2);
-    for (let i = particles.length - 1; i >= 0; i--) {
-      const p = particles[i];
-      p.x += p.vx * factor;
-      p.y += p.vy * factor;
-      p.vy += 0.04 * factor;
-      p.life -= 0.025 * factor;
-      if (p.life <= 0) particles.splice(i, 1);
-    }
-  }
+  // --------------------------------------------------
+  // Movimiento de la pala
+  // --------------------------------------------------
 
-  function draw() {
-    if (!ctx || !canvas) return;
-    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+  function updatePaddle() {
+    if (state.gameOver) return;
 
-    for (const block of blocks) {
-      if (!block.alive) continue;
-      ctx.globalAlpha = 0.34;
-      ctx.fillStyle = colorFor(block.type);
-      ctx.fillRect(block.x, block.y, block.width, block.height);
-      ctx.globalAlpha = 1;
-      ctx.strokeStyle = colorFor(block.type);
-      ctx.lineWidth = 2;
-      ctx.strokeRect(block.x + 1, block.y + 1, Math.max(0, block.width - 2), Math.max(0, block.height - 2));
-      if (block.maxResistance > 1) {
-        ctx.fillStyle = '#111';
-        ctx.font = 'bold 12px sans-serif';
-        ctx.fillText(String(block.resistance), block.x + 5, block.y + 14);
-      }
-    }
+    const maxX = Math.max(
+      0,
+      window.innerWidth - CONFIG.paddleWidth,
+    );
 
-    if (paddle) {
-      ctx.fillStyle = '#17202a';
-      ctx.beginPath();
-      ctx.roundRect(paddle.x, paddle.y, paddle.width, paddle.height, 6);
-      ctx.fill();
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
+    if (state.mouseX !== null) {
+      state.paddleX = Math.max(
+        0,
+        Math.min(
+          maxX,
+          state.mouseX - CONFIG.paddleWidth / 2,
+        ),
+      );
 
-    if (ball) {
-      ctx.beginPath();
-      ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
-      ctx.fillStyle = '#fff';
-      ctx.shadowColor = '#f1c40f';
-      ctx.shadowBlur = 10;
-      ctx.fill();
-      ctx.shadowBlur = 0;
-    }
-
-    for (const p of particles) {
-      ctx.globalAlpha = Math.max(0, p.life);
-      ctx.fillStyle = p.color;
-      ctx.fillRect(p.x, p.y, p.size, p.size);
-    }
-    ctx.globalAlpha = 1;
-
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
-    ctx.fillRect(12, 12, 176, 36);
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 14px sans-serif';
-    ctx.fillText(`Puntos: ${score}   Vidas: ${lives}`, 22, 35);
-
-    if (gameOver) {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
-      ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
-      ctx.fillStyle = '#fff';
-      ctx.textAlign = 'center';
-      ctx.font = 'bold 32px sans-serif';
-      ctx.fillText(blocks.every(block => !block.alive) ? '¡Web destruida!' : 'Fin de la partida', window.innerWidth / 2, window.innerHeight / 2);
-      ctx.font = '16px sans-serif';
-      ctx.fillText('Abre el popup de WebBreakout para volver a jugar o desactivarlo', window.innerWidth / 2, window.innerHeight / 2 + 34);
-      ctx.textAlign = 'start';
-    }
-  }
-
-  function gameLoop(time) {
-    if (!active) return;
-    const delta = lastTime ? Math.min(time - lastTime, 34) : 16.67;
-    lastTime = time;
-    if (!gameOver) updateBall();
-    updateParticles(delta);
-    draw();
-    if (active) animationId = requestAnimationFrame(gameLoop);
-  }
-
-  function startGame() {
-    if (active) return;
-    blocks = detectBlocks();
-    if (!blocks.length) {
-      chrome.runtime.sendMessage({ action: 'gameStatus', status: 'No se encontraron elementos jugables en esta página.' }).catch(() => {});
       return;
     }
 
-    active = true;
-    gameOver = false;
-    score = 0;
-    lives = 3;
-    particles = [];
-    lastTime = 0;
+    if (state.keys.left) state.paddleX -= 7;
+    if (state.keys.right) state.paddleX += 7;
 
-    canvas = document.createElement('canvas');
-    canvas.id = 'webbreakout-canvas';
-    Object.assign(canvas.style, {
-      position: 'fixed',
-      inset: '0',
-      zIndex: '2147483647',
-      pointerEvents: 'none',
-      margin: '0',
-      padding: '0',
-      border: '0'
+    state.paddleX = Math.max(
+      0,
+      Math.min(maxX, state.paddleX),
+    );
+  }
+
+  function onMouseMove(event) {
+    if (state.gameOver) return;
+    state.mouseX = event.clientX;
+  }
+
+  function onKeyDown(event) {
+    if (
+      ['ArrowLeft', 'ArrowRight', 'a', 'A', 'd', 'D'].includes(event.key)
+    ) {
+      if (
+        event.key === 'ArrowLeft' ||
+        event.key.toLowerCase() === 'a'
+      ) {
+        state.keys.left = true;
+      }
+
+      if (
+        event.key === 'ArrowRight' ||
+        event.key.toLowerCase() === 'd'
+      ) {
+        state.keys.right = true;
+      }
+    }
+  }
+
+  function onKeyUp(event) {
+    if (
+      event.key === 'ArrowLeft' ||
+      event.key.toLowerCase() === 'a'
+    ) {
+      state.keys.left = false;
+    }
+
+    if (
+      event.key === 'ArrowRight' ||
+      event.key.toLowerCase() === 'd'
+    ) {
+      state.keys.right = false;
+    }
+  }
+
+  // --------------------------------------------------
+  // Dibujado
+  // --------------------------------------------------
+
+  function drawBall() {
+    if (!state.ball) return;
+
+    const ctx = state.ctx;
+    const ball = state.ball;
+
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  function drawPaddle() {
+    const ctx = state.ctx;
+
+    const y =
+      window.innerHeight -
+      CONFIG.paddleBottom -
+      CONFIG.paddleHeight;
+
+    ctx.fillStyle = '#ffffff';
+
+    ctx.fillRect(
+      state.paddleX,
+      y,
+      CONFIG.paddleWidth,
+      CONFIG.paddleHeight,
+    );
+
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.lineWidth = 2;
+
+    ctx.strokeRect(
+      state.paddleX,
+      y,
+      CONFIG.paddleWidth,
+      CONFIG.paddleHeight,
+    );
+  }
+
+  function drawParticles() {
+    const ctx = state.ctx;
+
+    for (const particle of state.particles) {
+      ctx.globalAlpha = Math.max(0, particle.life);
+      ctx.fillStyle = particle.color;
+
+      ctx.beginPath();
+      ctx.arc(
+        particle.x,
+        particle.y,
+        particle.size,
+        0,
+        Math.PI * 2,
+      );
+
+      ctx.fill();
+    }
+
+    ctx.globalAlpha = 1;
+  }
+
+  function drawHUD() {
+    const ctx = state.ctx;
+
+    const remaining = Math.max(
+      0,
+      state.totalBlocks - state.destroyedBlocks,
+    );
+
+    const percentage = state.totalBlocks > 0
+      ? Math.round((remaining / state.totalBlocks) * 100)
+      : 0;
+
+    const x = 12;
+    const y = 12;
+    const width = 250;
+    const height = 76;
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.78)';
+    ctx.fillRect(x, y, width, height);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+
+    ctx.fillText(`Score: ${state.score}`, x + 10, y + 8);
+    ctx.fillText(`Vidas: ${state.lives}`, x + 145, y + 8);
+
+    ctx.font = '13px sans-serif';
+    ctx.fillText(`${percentage}% restante`, x + 10, y + 32);
+
+    const barX = x + 10;
+    const barY = y + 53;
+    const barWidth = width - 20;
+    const barHeight = 10;
+
+    // Fondo de la barra.
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+    ctx.fillRect(barX, barY, barWidth, barHeight);
+
+    // Progreso restante.
+    ctx.fillStyle = percentage > 50 ? '#35d9ff' : '#ffcf5c';
+    ctx.fillRect(
+      barX,
+      barY,
+      barWidth * (percentage / 100),
+      barHeight,
+    );
+  }
+
+  function drawGameOver() {
+    const ctx = state.ctx;
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    // Fondo semitransparente.
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.78)';
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 44px sans-serif';
+    ctx.fillText(
+      'GAME OVER',
+      width / 2,
+      height / 2 - 45,
+    );
+
+    ctx.font = 'bold 24px sans-serif';
+    ctx.fillText(
+      `Score: ${state.score}`,
+      width / 2,
+      height / 2 + 5,
+    );
+
+    ctx.font = '17px sans-serif';
+    ctx.fillStyle = '#ffcf5c';
+
+    ctx.fillText(
+      'Haz clic para volver a jugar',
+      width / 2,
+      height / 2 + 55,
+    );
+  }
+
+  function draw() {
+    if (!state.ctx) return;
+
+    const ctx = state.ctx;
+
+    ctx.clearRect(
+      0,
+      0,
+      window.innerWidth,
+      window.innerHeight,
+    );
+
+    // Los bloques DOM no se dibujan.
+    drawParticles();
+    drawPaddle();
+    drawBall();
+    drawHUD();
+
+    if (state.gameOver) {
+      drawGameOver();
+    }
+  }
+
+  // --------------------------------------------------
+  // Game Over y reinicio
+  // --------------------------------------------------
+
+  function restartGame() {
+    if (!state.active || !state.gameOver) return;
+
+    // Recuperar elementos destruidos para la nueva partida.
+    restoreVisibility();
+
+    state.blocks = detectBlocks();
+
+    state.totalBlocks = state.blocks.length;
+    state.destroyedBlocks = 0;
+
+    state.particles = [];
+    state.score = 0;
+    state.gameOver = false;
+    state.lastTime = 0;
+    state.mouseX = null;
+
+    state.keys.left = false;
+    state.keys.right = false;
+
+    state.paddleX =
+      (window.innerWidth - CONFIG.paddleWidth) / 2;
+
+    state.ball = createBall();
+
+    sendStatus(true, 'Game restarted');
+  }
+
+  function onGameClick(event) {
+    if (!state.active || !state.gameOver) return;
+
+    // No activar enlaces o botones de la web al reiniciar.
+    event.preventDefault();
+    event.stopPropagation();
+
+    restartGame();
+  }
+
+  // --------------------------------------------------
+  // Bucle del juego
+  // --------------------------------------------------
+
+  function gameLoop(timestamp) {
+    if (!state.active) return;
+
+    const delta = state.lastTime
+      ? Math.min(timestamp - state.lastTime, 40)
+      : 16.67;
+
+    state.lastTime = timestamp;
+
+    updateBlocks();
+    updatePaddle();
+    updateBall(delta);
+    updateParticles(delta);
+    draw();
+
+    state.animationFrame = requestAnimationFrame(gameLoop);
+  }
+
+  // --------------------------------------------------
+  // Activar y desactivar
+  // --------------------------------------------------
+
+  function startGame() {
+    if (state.active) return;
+
+    restoreVisibility();
+
+    state.blocks = detectBlocks();
+
+    state.totalBlocks = state.blocks.length;
+    state.destroyedBlocks = 0;
+
+    if (state.blocks.length === 0) {
+      sendStatus(false, 'No playable elements found on this page.');
+      return;
+    }
+
+    state.particles = [];
+    state.score = 0;
+    state.gameOver = false;
+    state.lastTime = 0;
+    state.mouseX = null;
+
+    state.keys.left = false;
+    state.keys.right = false;
+
+    state.paddleX =
+      (window.innerWidth - CONFIG.paddleWidth) / 2;
+
+    state.ball = createBall();
+    state.active = true;
+
+    createCanvas();
+
+    if (!state.ctx) {
+      stopGame();
+      sendStatus(false, 'Unable to create canvas context.');
+      return;
+    }
+
+    addListener(window, 'mousemove', onMouseMove, {
+      passive: true,
     });
-    (document.documentElement || document.body).appendChild(canvas);
-    ctx = canvas.getContext('2d');
-    paddle = {
-      x: window.innerWidth / 2 - CONFIG.paddleWidth / 2,
-      y: window.innerHeight - CONFIG.paddleBottom - CONFIG.paddleHeight,
-      width: CONFIG.paddleWidth,
-      height: CONFIG.paddleHeight
-    };
-    resizeCanvas();
-    resetBall();
 
-    window.addEventListener('mousemove', movePaddle, { passive: true });
-    window.addEventListener('resize', resizeCanvas, { passive: true });
-    window.addEventListener('scroll', resizeCanvas, { passive: true });
-    animationId = requestAnimationFrame(gameLoop);
-    chrome.runtime.sendMessage({ action: 'gameStatus', status: 'WebBreakout activo' }).catch(() => {});
+    addListener(window, 'keydown', onKeyDown);
+    addListener(window, 'keyup', onKeyUp);
+
+    addListener(window, 'resize', resizeCanvas, {
+      passive: true,
+    });
+
+    addListener(window, 'scroll', updateBlocks, {
+      passive: true,
+      capture: true,
+    });
+
+    // El clic solo se intercepta cuando aparece Game Over.
+    addListener(window, 'click', onGameClick, true);
+
+    state.animationFrame = requestAnimationFrame(gameLoop);
+
+    sendStatus(true, 'Game started');
   }
 
   function stopGame() {
-    active = false;
-    if (animationId) cancelAnimationFrame(animationId);
-    animationId = 0;
-    window.removeEventListener('mousemove', movePaddle);
-    window.removeEventListener('resize', resizeCanvas);
-    window.removeEventListener('scroll', resizeCanvas);
-    canvas?.remove();
-    canvas = null;
-    ctx = null;
-    blocks = [];
-    particles = [];
-    paddle = null;
-    ball = null;
-    chrome.runtime.sendMessage({ action: 'gameStatus', status: 'WebBreakout desactivado' }).catch(() => {});
+    const wasActive = state.active;
+
+    state.active = false;
+
+    if (state.animationFrame !== null) {
+      cancelAnimationFrame(state.animationFrame);
+      state.animationFrame = null;
+    }
+
+    for (const removeListener of state.listeners) {
+      removeListener();
+    }
+
+    state.listeners = [];
+
+    if (state.canvas) {
+      state.canvas.remove();
+      state.canvas = null;
+      state.ctx = null;
+    }
+
+    restoreVisibility();
+
+    state.blocks = [];
+    state.particles = [];
+    state.ball = null;
+    state.mouseX = null;
+    state.lastTime = 0;
+    state.gameOver = false;
+
+    state.keys.left = false;
+    state.keys.right = false;
+
+    if (wasActive) {
+      sendStatus(false, 'Game stopped');
+    }
   }
 
   function cleanup() {
     stopGame();
+
     chrome.runtime.onMessage.removeListener(messageListener);
+
     delete window.__webBreakout;
   }
 
-  function messageListener(message) {
-    if (message?.action === 'activate') startGame();
-    if (message?.action === 'deactivate') stopGame();
-    if (message?.action === 'toggle') active ? stopGame() : startGame();
+  // --------------------------------------------------
+  // Comunicación con popup.js
+  // Utiliza message.action, como tu popup actual.
+  // --------------------------------------------------
+
+  function messageListener(message, sender, sendResponse) {
+    if (!message || typeof message.action !== 'string') return;
+
+    switch (message.action) {
+      case 'activate':
+        startGame();
+
+        sendResponse({
+          ok: state.active,
+          active: state.active,
+          error: state.active
+            ? undefined
+            : 'No se han encontrado elementos jugables.',
+        });
+        break;
+
+      case 'deactivate':
+        stopGame();
+
+        sendResponse({
+          ok: true,
+          active: false,
+        });
+        break;
+
+      case 'toggle':
+        if (state.active) {
+          stopGame();
+        } else {
+          startGame();
+        }
+
+        sendResponse({
+          ok: state.active,
+          active: state.active,
+        });
+        break;
+
+      case 'getStatus':
+        sendResponse({
+          ok: true,
+          active: state.active,
+          gameOver: state.gameOver,
+          score: state.score,
+        });
+        break;
+
+      default:
+        sendResponse({
+          ok: false,
+          error: `Acción desconocida: ${message.action}`,
+        });
+    }
+
+    return false;
   }
 
   chrome.runtime.onMessage.addListener(messageListener);
-  window.__webBreakout = { cleanup, startGame, stopGame };
+
+  window.__webBreakout = {
+    startGame,
+    stopGame,
+    cleanup,
+  };
 })();
