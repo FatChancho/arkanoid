@@ -9,11 +9,14 @@ Extensión de Chrome (Manifest V3) que convierte la página actual en un escenar
 - **Destrucción por regiones**: los objetivos pequeños caen de un impacto; los grandes se parten en regiones y necesitan varios.
 - **Sin daños colaterales**: cada región pertenece a un único objetivo (el de la capa más alta). Destruir una imagen no borra el titular que está encima.
 - **Fragmentos** con la textura y los colores de la captura original, que se mueven y se desvanecen.
-- **Progreso**: objetivos destruidos y restantes, porcentaje de superficie destruida (sin contar dos veces las zonas solapadas), puntuación y vidas.
-- **Objetos que caen según la puntuación** (power-ups): bola triple, barra grande y láser. Ver «Objetos» más abajo.
+- **Banner retro fuera del tablero**: puntos, vidas, objetivos destruidos y restantes, porcentaje de superficie destruida (sin contar dos veces las zonas solapadas) y efectos activos con su tiempo, en una franja superior con tipografía de píxeles. No tapa la página: el tablero se escala para caber debajo, dentro de un marco neón.
+- **Objetos que caen según la puntuación** (power-ups): bola triple, barra grande y láser automático. Ver «Objetos» más abajo.
+- **Saque con clic**: la bola espera pegada a la pala (con un aviso «CLIC PARA LANZAR») y no se mueve hasta que haces clic. También con `Espacio` o tocando la pantalla.
+- **Revelar bloques (`B`)**: resalta en rojo, con halo desenfocado, lo que queda por destruir. Útil cuando quedan pocos.
+- **Aspecto arcade**: pala con contorno oscuro y extremos de color, bola y cápsulas con contorno (se ven sobre páginas claras y oscuras), avisos flotantes y destello al recoger un objeto.
 - **Sonido sintetizado** (Web Audio, sin archivos de audio): un rebote distinto para pared, pala y objetivo, y una explosión por cada región que se rompe, más larga y grave cuanto más área rompe el impacto. Tecla `M` para silenciar.
 - Pelota a velocidad constante con paso de física fijo (independiente de los Hz del monitor), 3 vidas, Game Over, victoria y reinicio.
-- Controles: ratón o táctil; flechas / `A` `D`; **clic izquierdo o `Espacio`: disparar (con el láser)**; `R` reinicia; `M` sonido; `Esc` sale; clic para reiniciar tras Game Over o victoria.
+- Controles: ratón o táctil; flechas / `A` `D`; **clic, `Espacio` o toque: lanzar la bola**; **`B`: revelar bloques**; `R` reinicia; `M` sonido; `Esc` sale; clic para reiniciar tras Game Over o victoria.
 - Compatible con `devicePixelRatio` y con el redimensionado de la ventana.
 
 ## Instalación y uso
@@ -61,6 +64,12 @@ Errores contemplados: página no permitida, fallo de captura, fallo de inyecció
 7. **Duplicados**: dos piezas con IoU ≥ 0,8 son la misma; se conserva la de tipo más específico. Máximo 250 objetivos.
 8. **Logos**: por nombre (id, clase, `alt`, `title`, `aria-label`, `<title>` del SVG, ruta de la imagen), por coincidir su nombre accesible con el título o el dominio del sitio, o por ser un medio dentro de un enlace a la portada en la parte alta de la página.
 
+## Saque y revelado de bloques
+
+**Saque.** Al empezar la partida, y también tras perder una vida, la bola espera sobre la pala y acompaña a la pala mientras la mueves. Se lanza con un clic izquierdo, con `Espacio` o tocando la pantalla; después, más clics no hacen nada. En Game Over, el clic reinicia la partida y la bola nueva también espera (ese mismo clic no la lanza). Para volver al saque automático a los 40 pasos, pon `serveWaitsForClick: false` en `CONFIG` de `game.js`.
+
+**Revelar (`B`).** Es un interruptor: `B` lo activa y otra pulsación lo apaga (mantener la tecla no parpadea). Resalta exactamente las regiones vivas, las mismas que usa la colisión: un halo rojo desenfocado por fuera del borde y un tinte suave por dentro, que deja ver la página. Lo que ya está destruido no se resalta, y se actualiza al instante tras cada impacto. El banner indica `B: VER BLOQUES` / `B: BLOQUES ON`. La capa se cachea a media resolución y solo se reconstruye cuando se destruye algo (≈1 ms por fotograma; unos 30 ms al reconstruirla en 1920×1080 con 500 regiones).
+
 ## Objetos (power-ups)
 
 Cada **60 puntos** cae una cápsula desde el punto del impacto que cruzó el umbral (10 puntos por región destruida, +20 al terminar un objetivo de varias regiones). Los tipos salen de una bolsa barajada: cada tres cápsulas aparecen los tres tipos, en orden aleatorio. Se recogen con la pala; si caen fuera no pasa nada.
@@ -69,11 +78,13 @@ Cada **60 puntos** cae una cápsula desde el punto del impacto que cruzó el umb
 |---|---|
 | Tres puntos (amarilla) | **Bola triple**: cada bola se divide en tres (±22°), hasta un máximo de 9. Perder una bola no cuesta vida; solo se pierde una vida al perder la última. |
 | Flecha doble (azul) | **Barra grande**: la pala pasa de 110 a 190 px durante 20 s. |
-| Dos barras (roja) | **Láser** durante 15 s: clic izquierdo (o `Espacio`, o tocar la pantalla) dispara 2 proyectiles desde los extremos de la pala. Mantener pulsado repite el disparo cada 14 pasos (~0,23 s). Cada proyectil destruye como mucho una región, igual que la pelota, y puntúa igual. |
+| Dos barras (roja) | **Láser automático** durante 15 s: sin pulsar nada, dispara 2 proyectiles desde los extremos de la pala cada 24 pasos (0,4 s). Cada proyectil destruye como mucho una región, igual que la pelota, y puntúa igual. |
 
 - Recoger un objeto del mismo tipo reinicia su temporizador (no se acumulan).
 - Perder una vida o reiniciar elimina los efectos, las cápsulas en caída y los proyectiles.
-- El panel de efectos muestra el número de bolas y el tiempo restante de cada efecto.
+- El banner muestra el número de bolas y el tiempo restante de cada efecto (parpadea en los últimos 3 s).
+- Al recoger un objeto, la pala destella y aparece un aviso flotante («BARRA GRANDE», «BOLA TRIPLE», «LÁSER AUTOMÁTICO»).
+- Equilibrio: el láser acorta mucho las partidas, sobre todo si cae pronto. Si te parece excesivo, baja `laserSteps` o sube `laserCooldownSteps` en `CONFIG`.
 - Todos los valores (`powerupEvery`, duraciones, `maxBalls`, ancho de la barra grande, enfriamiento...) están en `CONFIG` al inicio de `game.js`; `powerupEvery: 0` desactiva los objetos.
 
 ## Sonido y política de autoplay
@@ -91,10 +102,12 @@ Chrome no deja sonar a una página hasta que el usuario interactúa con ella (un
 - **Silueta aproximada.** Para logos, SVG, canvas y PNG/SVG pequeños la forma se obtiene de la captura (celdas que difieren del color de fondo, cerrando huecos de ~6 px). Solo funciona si el fondo alrededor es uniforme y con contraste suficiente (una letra amarilla sobre fondo amarillo queda fuera). En otro caso se usa la caja con sus esquinas redondeadas. No es el contorno vectorial exacto.
 - **Resolución de máscara** de 1 a 4 px CSS (2 px en un portátil típico); el borrado se redondea a píxeles de la captura, con hasta 1 px de desviación en los bordes.
 - **Línea de la pala.** Lo que queda por debajo de la pala (por ejemplo el pie de página de Google) es inalcanzable: no cuenta como destruible y permanece intacto.
+- **La bola en espera puede nacer dentro de un objetivo**: si la página tiene un elemento pegado al borde inferior (por ejemplo, el pie de Google), la bola, que espera sobre la pala, queda dentro de él. Al lanzarla destruye esa región al instante y puede rebotar hacia abajo. Es la misma geometría de siempre; ahora se nota porque la bola espera a la vista.
 - **Los objetos solo caen de impactos** (de bola o de proyectil), nunca de otras fuentes, y el ritmo depende de la puntuación: en una página con pocos objetivos caerán pocos.
 - **Orden de pintado aproximado**: las capas son por tipo (fondo < imagen < tarjeta < logo/control < texto), no el `z-index` real.
 - **No se recorre Shadow DOM**, ni pseudo-elementos (`::before/::after`) ni fuentes de iconos. El contenido de `iframe` se trata como una sola pieza.
-- **Redimensionado**: la captura no se puede repetir desde la página, así que el escenario se escala uniformemente (con barras oscuras si cambia la proporción) en lugar de recalcular los objetivos.
+- **Tablero algo más pequeño**: para dejar sitio al banner, la página capturada se reduce un 7-11 % (64 px de banner en ventanas de 1000 px o más de ancho; 34 px en las más estrechas). Al redimensionar la ventana, la captura no se puede repetir desde la página, así que el tablero se vuelve a escalar uniformemente (con barras oscuras si cambia la proporción) en lugar de recalcular los objetivos.
+- **Tipografía del banner**: fuente de píxeles propia, solo mayúsculas, dígitos y la puntuación necesaria (con acentos Á É Í Ó Ú). En ventanas muy estrechas el banner descarta lo opcional (tag de láser, bolas, aviso de sonido) y, si hace falta, acorta o quita la barra de progreso.
 - El overlay captura el ratón y las teclas del juego mientras está activo; la página no recibe esos eventos.
 - Se recorren como máximo 30 000 elementos del DOM.
 

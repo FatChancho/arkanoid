@@ -7,18 +7,23 @@
  *  - Objetos (power-ups) que caen según la puntuación y sus efectos.
  *  - Entrada de teclado, ratón y táctil.
  *  - Efectos: fragmentos (trozos de la captura), polvo y sonido (audio.js).
- *  - HUD de progreso.
+ *  - Banner retro de progreso, fuera del tablero.
  *
  * El escenario (captura con lo destruido borrado) lo pinta la capa de
  * escena de destruction.js; las regiones y la colisión las resuelve el motor
  * de destrucción. Este módulo solo les pregunta y les ordena.
  *
- * COORDENADAS
+ * COORDENADAS Y BANNER
  * El juego trabaja en un "escenario" del tamaño del viewport en el momento de
- * la captura. Si la ventana cambia de tamaño, el escenario se escala de forma
- * uniforme (con barras oscuras si cambia la proporción) porque la captura no
- * se puede repetir desde la página. El canvas se ajusta siempre a
- * devicePixelRatio.
+ * la captura. El banner (puntos, vidas, progreso, efectos) ocupa una franja
+ * superior FUERA del tablero, así que nunca tapa la página: el escenario se
+ * escala de forma uniforme para caber debajo del banner (con un marco retro y
+ * barras oscuras si cambia la proporción). Esto también cubre el
+ * redimensionado de la ventana, porque la captura no se puede repetir desde
+ * la página. El canvas se ajusta siempre a devicePixelRatio.
+ *
+ * La tipografía del banner es una fuente de píxeles 5x7 propia dibujada con
+ * rectángulos: no depende de fuentes del sistema ni de la página.
  *
  * FÍSICA
  * Paso fijo de 1/60 s (la velocidad no depende de los Hz del monitor) y
@@ -27,6 +32,19 @@
  * tras un impacto esa pelota tiene un bloqueo de 3 subpasos en los que rebota
  * sin dañar, para que un mismo golpe no se lleve varios objetivos contiguos.
  *
+ * SAQUE
+ * La bola espera pegada a la pala hasta que el jugador la lanza con un clic
+ * (o con Espacio, o tocando la pantalla). Vale para el saque inicial y para el
+ * de después de perder una vida. `serveWaitsForClick: false` recupera el saque
+ * automático tras `serveDelaySteps` pasos.
+ *
+ * REVELAR BLOQUES
+ * La tecla B alterna un resaltado rojo con desenfoque sobre las regiones que
+ * quedan vivas (las mismas que usa la colisión): un halo que sale por fuera del
+ * borde y un tinte suave en el interior, para no tapar el contenido. Se pinta
+ * en una capa en caché, a media resolución, que solo se reconstruye cuando se
+ * destruye algo.
+ *
  * OBJETOS (POWER-UPS)
  * Cada `powerupEvery` puntos (60 por defecto) cae un objeto desde el lugar del
  * impacto que cruzó el umbral. Los tipos salen de una "bolsa" barajada, así
@@ -34,10 +52,9 @@
  *   - multiball: cada pelota se triplica (±22° respecto a su trayectoria),
  *                hasta `maxBalls` pelotas.
  *   - wide:      la pala pasa de 110 a 190 px durante 20 s.
- *   - laser:     durante 15 s, clic del ratón (o Espacio, o tocar la pantalla)
- *                dispara dos proyectiles desde los extremos de la pala. Dejar
- *                pulsado repite el disparo con un enfriamiento de 14 pasos.
- *                Cada proyectil destruye como mucho una región, igual que la
+ *   - laser:     durante 15 s dispara SOLO, sin pulsar nada: dos proyectiles
+ *                desde los extremos de la pala cada 24 pasos (0,4 s). Cada
+ *                proyectil destruye como mucho una región, igual que la
  *                pelota.
  * Perder una vida o reiniciar elimina los efectos y los objetos en caída.
  * Recoger un objeto del mismo tipo reinicia su temporizador (no se acumulan).
@@ -57,6 +74,8 @@
     ballSpeed: 12,
     maxLives: 3,
     serveDelaySteps: 40,
+    serveWaitsForClick: true,
+    revealBlur: 5,
     hitLockSubsteps: 3,
     maxSubstepDistance: 3.5,
     maxStepsPerFrame: 3,
@@ -81,17 +100,18 @@
     laserSteps: 900,
     maxBalls: 9,
     splitAngle: 0.38,
-    laserCooldownSteps: 14,
+    laserCooldownSteps: 24,
     boltSpeed: 11,
     boltStep: 3.7,
     boltRadius: 2
   };
 
   const STEP_MS = 1000 / 60;
-  const GAME_KEYS = new Set(["ArrowLeft", "ArrowRight", " ", "a", "d", "r", "m"]);
+  const GAME_KEYS = new Set(["ArrowLeft", "ArrowRight", " ", "a", "d", "r", "m", "b"]);
 
   const ITEM_TYPES = ["multiball", "wide", "laser"];
   const ITEM_COLORS = { multiball: "#ffd166", wide: "#35d9ff", laser: "#ff5d73" };
+  const ITEM_LABELS = { multiball: "BOLA TRIPLE", wide: "BARRA GRANDE", laser: "LÁSER AUTOMÁTICO" };
 
   function clamp(v, lo, hi) {
     return v < lo ? lo : v > hi ? hi : v;
@@ -111,6 +131,110 @@
     ctx.arcTo(x, y + h, x, y, rr);
     ctx.arcTo(x, y, x + w, y, rr);
     ctx.closePath();
+  }
+
+
+  const INK = "#10131a";
+
+  /* Fuente de píxeles 5x7 (solo mayúsculas, dígitos y la puntuación necesaria). */
+  const FONT_ROWS = {
+    A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+    B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
+    C: ["01110", "10001", "10000", "10000", "10000", "10001", "01110"],
+    D: ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
+    E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+    F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
+    G: ["01110", "10001", "10000", "10111", "10001", "10001", "01111"],
+    H: ["10001", "10001", "10001", "11111", "10001", "10001", "10001"],
+    I: ["01110", "00100", "00100", "00100", "00100", "00100", "01110"],
+    J: ["00111", "00010", "00010", "00010", "00010", "10010", "01100"],
+    K: ["10001", "10010", "10100", "11000", "10100", "10010", "10001"],
+    L: ["10000", "10000", "10000", "10000", "10000", "10000", "11111"],
+    M: ["10001", "11011", "10101", "10101", "10001", "10001", "10001"],
+    N: ["10001", "11001", "10101", "10011", "10001", "10001", "10001"],
+    O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
+    P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
+    Q: ["01110", "10001", "10001", "10001", "10101", "10010", "01101"],
+    R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
+    S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
+    T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+    U: ["10001", "10001", "10001", "10001", "10001", "10001", "01110"],
+    V: ["10001", "10001", "10001", "10001", "10001", "01010", "00100"],
+    W: ["10001", "10001", "10001", "10101", "10101", "11011", "10001"],
+    X: ["10001", "10001", "01010", "00100", "01010", "10001", "10001"],
+    Y: ["10001", "10001", "01010", "00100", "00100", "00100", "00100"],
+    Z: ["11111", "00001", "00010", "00100", "01000", "10000", "11111"],
+    0: ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+    1: ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
+    2: ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
+    3: ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
+    4: ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
+    5: ["11111", "10000", "11110", "00001", "00001", "10001", "01110"],
+    6: ["00110", "01000", "10000", "11110", "10001", "10001", "01110"],
+    7: ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
+    8: ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
+    9: ["01110", "10001", "10001", "01111", "00001", "00010", "01100"],
+    ":": ["00000", "00100", "00100", "00000", "00100", "00100", "00000"],
+    "%": ["11001", "11010", "00010", "00100", "01000", "01011", "10011"],
+    "-": ["00000", "00000", "00000", "11111", "00000", "00000", "00000"],
+    ".": ["00000", "00000", "00000", "00000", "00000", "01100", "01100"],
+    "!": ["00100", "00100", "00100", "00100", "00100", "00000", "00100"],
+    "¡": ["00100", "00000", "00100", "00100", "00100", "00100", "00100"],
+    "+": ["00000", "00100", "00100", "11111", "00100", "00100", "00000"]
+  };
+  const ACCENTED = { "Á": "A", "É": "E", "Í": "I", "Ó": "O", "Ú": "U" };
+  const GLYPHS = {};
+  for (const [ch, rows] of Object.entries(FONT_ROWS)) {
+    const dots = [];
+    rows.forEach((row, y) => {
+      for (let x = 0; x < 5; x++) if (row[x] === "1") dots.push([x, y]);
+    });
+    GLYPHS[ch] = dots;
+  }
+  const HEART = ["0110110", "1111111", "1111111", "0111110", "0011100", "0001000"];
+
+  /** Ancho que avanza una cadena (5 columnas + 1 de separación por letra). */
+  function textAdvance(str, px) {
+    return str.length * 6 * px;
+  }
+
+  function textWidth(str, px) {
+    return str.length ? textAdvance(str, px) - px : 0;
+  }
+
+  function textPass(ctx, str, x, y, px, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    let cx = x;
+    for (const raw of str) {
+      const ch = raw.toUpperCase();
+      const base = ACCENTED[ch] || ch;
+      const dots = GLYPHS[base];
+      if (dots) {
+        for (const [gx, gy] of dots) ctx.rect(cx + gx * px, y + gy * px, px, px);
+        if (ACCENTED[ch]) {
+          ctx.rect(cx + 3 * px, y - 2 * px, px, px);
+          ctx.rect(cx + 2 * px, y - px, px, px);
+        }
+      }
+      cx += 6 * px;
+    }
+    ctx.fill();
+  }
+
+  /** Dibuja texto de píxeles; con `shadow` añade una sombra desplazada. */
+  function drawText(ctx, str, x, y, px, color, shadow) {
+    if (shadow) textPass(ctx, str, x + px, y + px, px, shadow);
+    textPass(ctx, str, x, y, px, color);
+  }
+
+  function drawHeart(ctx, x, y, px, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    HEART.forEach((row, gy) => {
+      for (let gx = 0; gx < 7; gx++) if (row[gx] === "1") ctx.rect(x + gx * px, y + gy * px, px, px);
+    });
+    ctx.fill();
   }
 
   /**
@@ -142,7 +266,12 @@
       bolts: [],
       effects: { wide: 0, laser: 0 },
       cooldown: 0,
-      firing: false,
+      tick: 0,
+      flash: { steps: 0, color: "#ffffff" },
+      toasts: [],
+      patterns: null,
+      bannerInfo: null,
+      reveal: { on: false, dirty: true, layer: null, sharp: null },
       nextPowerup: cfg.powerupEvery,
       bag: [],
       spawned: 0,
@@ -151,7 +280,7 @@
       audio: null,
       fragments: [],
       dust: [],
-      view: { scale: 1, offsetX: 0, offsetY: 0, dpr: 1 }
+      view: { scale: 1, offsetX: 0, offsetY: 0, dpr: 1, vw: 0, vh: 0, bannerH: 0, ui: 1 }
     };
     const removers = [];
 
@@ -211,7 +340,27 @@
       document.documentElement.appendChild(canvas);
       g.canvas = canvas;
       g.ctx = canvas.getContext("2d");
+      g.patterns = {
+        dots: makePattern(8, 8, (c) => {
+          c.fillStyle = "#0b0f1a";
+          c.fillRect(0, 0, 8, 8);
+          c.fillStyle = "#151d31";
+          c.fillRect(0, 0, 2, 2);
+        }),
+        scan: makePattern(1, 4, (c) => {
+          c.fillStyle = "rgba(0,0,0,0.3)";
+          c.fillRect(0, 3, 1, 1);
+        })
+      };
       setCursor();
+    }
+
+    function makePattern(w, h, paint) {
+      const tile = document.createElement("canvas");
+      tile.width = w;
+      tile.height = h;
+      paint(tile.getContext("2d"));
+      return g.ctx.createPattern(tile, "repeat");
     }
 
     function resize() {
@@ -225,12 +374,21 @@
       g.canvas.width = Math.max(1, Math.round(vw * dpr));
       g.canvas.height = Math.max(1, Math.round(vh * dpr));
 
-      const scale = Math.min(vw / W, vh / H);
+      // Banner fuera del tablero: el escenario se escala para caber debajo de
+      // él (con 6 px de margen para el marco).
+      const ui = vw >= 1000 ? 2 : 1;
+      const bannerH = ui === 2 ? 64 : 34;
+      const availH = Math.max(1, vh - bannerH);
+      const scale = Math.max(0.05, Math.min((vw - 12) / W, (availH - 12) / H));
       g.view = {
         scale,
         offsetX: (vw - W * scale) / 2,
-        offsetY: (vh - H * scale) / 2,
-        dpr
+        offsetY: bannerH + (availH - H * scale) / 2,
+        dpr,
+        vw,
+        vh,
+        bannerH,
+        ui
       };
     }
 
@@ -248,8 +406,26 @@
         Math.sin(angle) * cfg.ballSpeed,
         -Math.cos(angle) * cfg.ballSpeed
       );
-      b.serve = cfg.serveDelaySteps;
+      // Espera pegada a la pala hasta el clic (Infinity no se agota nunca).
+      b.serve = cfg.serveWaitsForClick ? Infinity : cfg.serveDelaySteps;
       g.balls = [b];
+    }
+
+    /** Lanza las bolas que esperan en la pala. Devuelve si lanzó alguna. */
+    function launchBall() {
+      if (g.state !== "playing") return false;
+      let launched = false;
+      for (const b of g.balls) {
+        if (b.serve > 0) {
+          b.serve = 0;
+          launched = true;
+        }
+      }
+      return launched;
+    }
+
+    function waitingForLaunch() {
+      return g.state === "playing" && g.balls.some((b) => b.serve > 0);
     }
 
     /** Quita efectos, objetos en caída y proyectiles (vida perdida o reinicio). */
@@ -259,13 +435,14 @@
       g.effects.wide = 0;
       g.effects.laser = 0;
       g.cooldown = 0;
-      g.firing = false;
+      g.flash.steps = 0;
       g.paddleW = cfg.paddleWidth;
     }
 
     function restart() {
       engine.reset();
       sceneLayer.reset();
+      g.reveal.dirty = true;
       g.score = 0;
       g.lives = cfg.maxLives;
       g.fragments = [];
@@ -297,7 +474,6 @@
       g.balls = [];
       g.items = [];
       g.bolts = [];
-      g.firing = false;
       setCursor();
     }
 
@@ -342,6 +518,13 @@
         d.life -= 0.03;
       }
       g.dust = g.dust.filter((d) => d.life > 0);
+
+      for (const t of g.toasts) {
+        t.y -= 0.6;
+        t.life -= 1 / 75;
+      }
+      g.toasts = g.toasts.filter((t) => t.life > 0);
+      if (g.flash.steps > 0) g.flash.steps--;
     }
 
     /* ---------------- Impactos y puntuación ---------------- */
@@ -353,6 +536,7 @@
 
       sceneLayer.erase(result.rects);
       addEffects(result.fragments);
+      g.reveal.dirty = true;
 
       // Cuanto más área rompe el impacto, más larga y grave es la explosión.
       sfx("explosion", clamp(Math.sqrt(result.area) / 220 + (result.targetDestroyed ? 0.15 : 0), 0.2, 1));
@@ -424,6 +608,16 @@
         g.cooldown = 0;
       }
       sfx("pickup");
+
+      // Aviso flotante y destello de la pala: se ve aunque no mires el banner.
+      g.toasts.push({
+        text: ITEM_LABELS[type],
+        color: ITEM_COLORS[type],
+        x: g.paddleX,
+        y: paddleY() - 26,
+        life: 1
+      });
+      g.flash = { steps: 40, color: ITEM_COLORS[type] };
     }
 
     function updateItems() {
@@ -468,7 +662,7 @@
      * mide 10 px) y los consume al tocar una región viva.
      */
     function updateBolts() {
-      if (g.effects.laser > 0 && (g.firing || g.keys.has(" "))) fireLaser();
+      if (g.effects.laser > 0) fireLaser(); // automático; el enfriamiento marca el ritmo
 
       const n = Math.max(1, Math.ceil(cfg.boltSpeed / cfg.boltStep));
       const step = cfg.boltSpeed / n;
@@ -633,6 +827,7 @@
     }
 
     function update() {
+      g.tick++;
       if (g.state === "playing") {
         updatePaddle();
         updateTimers();
@@ -702,229 +897,472 @@
       }
     }
 
+    /**
+     * Resaltado rojo de las regiones que quedan. Se pinta a media resolución en
+     * un lienzo auxiliar (rojo plano) y se desenfoca en otro; ambos se reusan
+     * mientras no se destruya nada.
+     */
+    function rebuildReveal() {
+      const half = 0.5;
+      const rw = Math.max(1, Math.ceil(W * half));
+      const rh = Math.max(1, Math.ceil(H * half));
+      const mk = () => {
+        const c = document.createElement("canvas");
+        c.width = rw;
+        c.height = rh;
+        return c;
+      };
+      if (!g.reveal.sharp) {
+        g.reveal.sharp = mk();
+        g.reveal.layer = mk();
+      }
+
+      const sharp = g.reveal.sharp.getContext("2d");
+      sharp.clearRect(0, 0, rw, rh);
+      sharp.fillStyle = "#ff1e3c";
+      sharp.beginPath();
+      for (const t of engine.targets) {
+        if (t.destroyed) continue;
+        for (const ch of t.chunks) {
+          if (!ch.alive) continue;
+          for (const r of ch.rects) sharp.rect(r.x * half, r.y * half, r.w * half, r.h * half);
+        }
+      }
+      sharp.fill();
+
+      const blur = g.reveal.layer.getContext("2d");
+      blur.clearRect(0, 0, rw, rh);
+      if ("filter" in blur) blur.filter = "blur(" + cfg.revealBlur + "px)";
+      blur.drawImage(g.reveal.sharp, 0, 0);
+      if ("filter" in blur) blur.filter = "none";
+
+      // Se vacía el interior: queda solo el halo que sale por fuera del borde,
+      // así los bloques grandes no tapan el contenido de la página.
+      blur.globalCompositeOperation = "destination-out";
+      blur.drawImage(g.reveal.sharp, 0, 0);
+      blur.globalCompositeOperation = "source-over";
+      g.reveal.dirty = false;
+    }
+
+    function drawReveal(ctx) {
+      if (!g.reveal.on) return;
+      if (g.reveal.dirty || !g.reveal.layer) rebuildReveal();
+
+      const pulse = 0.9 + 0.1 * Math.sin(g.tick / 8);
+      ctx.save();
+      ctx.globalAlpha = pulse;
+      for (let i = 0; i < 3; i++) ctx.drawImage(g.reveal.layer, 0, 0, W, H); // halo: varias pasadas = más intensidad
+      ctx.globalAlpha = 0.3 * pulse;
+      ctx.drawImage(g.reveal.sharp, 0, 0, W, H); // tinte suave del interior (deja ver la página)
+      ctx.restore();
+    }
+
+    /** Aviso sobre la bola mientras espera el lanzamiento. */
+    function drawLaunchPrompt(ctx) {
+      if (!waitingForLaunch() || (g.tick >> 4) % 2 === 1) return;
+      const text = "CLIC PARA LANZAR";
+      const px = 2;
+      const tw = textWidth(text, px);
+      const x = clamp(g.paddleX - tw / 2, 8, W - tw - 8);
+      const y = paddleY() - 52;
+      ctx.fillStyle = INK;
+      ctx.fillRect(x - 6, y - 5, tw + 12, 7 * px + 10);
+      ctx.fillStyle = "#ffd166";
+      ctx.fillRect(x - 6, y - 5, tw + 12, 1);
+      ctx.fillRect(x - 6, y - 5 + 7 * px + 9, tw + 12, 1);
+      drawText(ctx, text, x, y, px, "#ffd166");
+    }
+
+    /** Cápsulas con contorno oscuro: se ven sobre fondos claros y oscuros. */
     function drawItems(ctx) {
       for (const it of g.items) {
         const w = cfg.itemWidth;
         const h = cfg.itemHeight;
         ctx.save();
         ctx.translate(it.x, it.y);
-        ctx.shadowColor = ITEM_COLORS[it.type];
-        ctx.shadowBlur = 12;
+        ctx.fillStyle = INK;
+        roundRectPath(ctx, -w / 2 - 2, -h / 2 - 2, w + 4, h + 4, h / 2 + 2);
+        ctx.fill();
         ctx.fillStyle = ITEM_COLORS[it.type];
         roundRectPath(ctx, -w / 2, -h / 2, w, h, h / 2);
         ctx.fill();
-        ctx.shadowBlur = 0;
-        ctx.strokeStyle = "rgba(255,255,255,0.9)";
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
+        ctx.fillStyle = "rgba(255,255,255,0.4)";
+        ctx.fillRect(-w / 2 + 7, -h / 2 + 2, w - 14, 2);
         drawItemIcon(ctx, it.type);
         ctx.restore();
       }
     }
 
     function drawBolts(ctx) {
-      if (!g.bolts.length) return;
-      ctx.save();
-      ctx.strokeStyle = "#ff5d73";
-      ctx.shadowColor = "#ff5d73";
-      ctx.shadowBlur = 10;
-      ctx.lineWidth = 3;
-      ctx.lineCap = "round";
+      ctx.lineCap = "butt";
       for (const b of g.bolts) {
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(b.x, b.y - 1);
+        ctx.lineTo(b.x, b.y + 15);
+        ctx.stroke();
+        ctx.strokeStyle = "#ff5d73";
+        ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.moveTo(b.x, b.y);
         ctx.lineTo(b.x, b.y + 14);
         ctx.stroke();
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(b.x, b.y + 1);
+        ctx.lineTo(b.x, b.y + 12);
+        ctx.stroke();
       }
-      ctx.restore();
     }
 
+    /**
+     * Pala estilo arcade con contorno oscuro de 2 px y cuerpo de colores
+     * planos: se distingue sobre una página blanca igual que sobre una negra.
+     * Con la barra grande los extremos pasan a cian; al recoger un objeto
+     * destella durante 40 pasos.
+     */
+    function drawPaddle(ctx) {
+      const w = g.paddleW;
+      const x = g.paddleX - w / 2;
+      const y = paddleY();
+      const h = cfg.paddleHeight;
+      const flashOn = g.flash.steps > 0 && (g.flash.steps >> 2) % 2 === 0;
 
-function drawPaddle(ctx) {
-  const x = g.paddleX - cfg.paddleWidth / 2
-  const y = paddleY()
+      ctx.fillStyle = INK;
+      roundRectPath(ctx, x - 2, y - 2, w + 4, h + 4, 8);
+      ctx.fill();
 
-  // Sombra para separarla del fondo de la página
-  ctx.shadowColor = "rgba(0, 180, 255, 0.6)"
-  ctx.shadowBlur = 8
+      ctx.save();
+      roundRectPath(ctx, x, y, w, h, 6);
+      ctx.clip();
+      const body = flashOn ? g.flash.color : null;
+      ctx.fillStyle = body || "#eef3fb";
+      ctx.fillRect(x, y, w, 4);
+      ctx.fillStyle = body || "#b8c4d8";
+      ctx.fillRect(x, y + 4, w, 4);
+      ctx.fillStyle = body || "#7f8da6";
+      ctx.fillRect(x, y + 8, w, h - 8);
 
-  // Cuerpo turquesa
-  ctx.fillStyle = "#00D9FF"
+      const cap = g.effects.wide > 0 ? "#35d9ff" : "#ff3b4e";
+      ctx.fillStyle = flashOn ? "#ffffff" : cap;
+      ctx.fillRect(x, y, 14, h);
+      ctx.fillRect(x + w - 14, y, 14, h);
+      ctx.fillStyle = "rgba(255,255,255,0.45)";
+      ctx.fillRect(x, y, 14, 3);
+      ctx.fillRect(x + w - 14, y, 14, 3);
+      ctx.restore();
 
-  roundRectPath(
-    ctx,
-    x,
-    y,
-    cfg.paddleWidth,
-    cfg.paddleHeight,
-    7
-  )
-
-  ctx.fill()
-
-  // Borde azul oscuro
-  ctx.shadowBlur = 0
-  ctx.strokeStyle = "#075985"
-  ctx.lineWidth = 2
-
-  roundRectPath(
-    ctx,
-    x,
-    y,
-    cfg.paddleWidth,
-    cfg.paddleHeight,
-    7
-  )
-
-  ctx.stroke()
-
-  // Reflejo superior
-  ctx.beginPath()
-  ctx.moveTo(x + 9, y + 3)
-  ctx.lineTo(x + cfg.paddleWidth - 9, y + 3)
-
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.8)"
-  ctx.lineWidth = 1.5
-  ctx.stroke()
-}
-
+      if (g.effects.laser > 0) {
+        for (const cx of [x + 3, x + w - 11]) {
+          ctx.fillStyle = INK;
+          ctx.fillRect(cx - 1, y - 9, 10, 11);
+          ctx.fillStyle = "#ff5d73";
+          ctx.fillRect(cx + 1, y - 7, 6, 9);
+        }
+      }
+    }
 
     function drawBalls(ctx) {
-      ctx.fillStyle = "#ffd166";
-      ctx.shadowColor = "#ffd166";
-      ctx.shadowBlur = 12;
       for (const b of g.balls) {
+        ctx.fillStyle = INK;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.r + 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#ffd166";
         ctx.beginPath();
         ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
         ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,0.75)";
+        ctx.fillRect(b.x - 3, b.y - 4, 3, 3);
       }
-      ctx.shadowBlur = 0;
     }
 
-    function drawHud(ctx) {
+    function drawToasts(ctx) {
+      for (const t of g.toasts) {
+        const px = 2;
+        const tw = textWidth(t.text, px);
+        ctx.globalAlpha = clamp(t.life * 2, 0, 1);
+        drawText(ctx, t.text, clamp(t.x - tw / 2, 4, W - tw - 4), t.y, px, t.color, INK);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    /* ---- Banner retro (espacio de pantalla, fuera del tablero) ---- */
+
+    function drawTag(ctx, text, x, y, px, color) {
+      const padX = 3 * px;
+      const padY = 2 * px;
+      const w = textWidth(text, px) + 2 * padX;
+      const h = 7 * px + 2 * padY;
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y - padY, w, px);
+      ctx.fillRect(x, y - padY + h - px, w, px);
+      ctx.fillRect(x, y - padY, px, h);
+      ctx.fillRect(x + w - px, y - padY, px, h);
+      drawText(ctx, text, x + padX, y, px, color);
+    }
+
+    function bannerSegments(ctx, px, barVariant) {
+      const LABEL = "#8b98b8";
+      const VALUE = "#ffffff";
+      const adv = (str) => textAdvance(str, px);
+      const wid = (str) => textWidth(str, px);
       const s = engine.stats();
       const pct = Math.min(100, Math.floor(s.percentDestroyed));
-      const panelW = Math.min(300, W - 28);
 
-      ctx.fillStyle = "rgba(12, 17, 27, 0.88)";
-      roundRectPath(ctx, 14, 14, panelW, 142, 12);
-      ctx.fill();
+      const field = (label, value, color, opt) => ({
+        opt: Boolean(opt),
+        w: wid(label + " " + value),
+        draw: (x, y) => {
+          drawText(ctx, label, x, y, px, LABEL);
+          drawText(ctx, value, x + adv(label + " "), y, px, color || VALUE);
+        }
+      });
 
-      ctx.textBaseline = "top";
-      ctx.textAlign = "start";
-      ctx.font = "bold 15px system-ui, sans-serif";
-      ctx.fillStyle = "#ffffff";
-      ctx.fillText("Puntos: " + g.score, 28, 26);
-      ctx.fillText("Vidas: " + ("♥ ".repeat(g.lives).trim() || "—"), 28, 48);
+      /* Fila 1 */
+      const left1 = [
+        {
+          opt: false,
+          w: wid("WEBBREAKOUT"),
+          draw: (x, y) => drawText(ctx, "WEBBREAKOUT", x, y, px, "#35d9ff", "#0a4a5a")
+        },
+        field("PUNTOS", String(g.score).padStart(6, "0"), "#ffd166")
+      ];
 
-      ctx.font = "12px system-ui, sans-serif";
-      ctx.fillStyle = "#cbd5e1";
-      ctx.fillText(
-        "Destruidos: " + s.destroyedTargets + "   Restantes: " + s.remainingTargets,
-        28,
-        72
-      );
+      const manyLives = cfg.maxLives > 5;
+      const heartsW = manyLives ? 8 * px + wid("X" + g.lives) : cfg.maxLives * 8 * px - px;
+      left1.push({
+        opt: false,
+        w: adv("VIDAS ") + heartsW,
+        draw: (x, y) => {
+          drawText(ctx, "VIDAS", x, y, px, LABEL);
+          let hx = x + adv("VIDAS ");
+          if (manyLives) {
+            drawHeart(ctx, hx, y, px, "#ff3b4e");
+            drawText(ctx, "X" + g.lives, hx + 8 * px, y, px, VALUE);
+          } else {
+            for (let i = 0; i < cfg.maxLives; i++, hx += 8 * px) {
+              drawHeart(ctx, hx, y, px, i < g.lives ? "#ff3b4e" : "#2a3350");
+            }
+          }
+        }
+      });
+      if (g.balls.length > 1) left1.push(field("BOLAS", "X" + g.balls.length, ITEM_COLORS.multiball, true));
 
-      const barX = 28;
-      const barW = panelW - 28;
-      ctx.fillStyle = "rgba(255,255,255,0.2)";
-      ctx.fillRect(barX, 94, barW, 8);
-      ctx.fillStyle = "#ffd166";
-      ctx.fillRect(barX, 94, barW * (pct / 100), 8);
-
-      ctx.font = "bold 11px system-ui, sans-serif";
-      ctx.fillStyle = "#ffffff";
-      ctx.fillText(pct + "% de la superficie destruida", barX, 110);
-
-      const sound = g.audio ? g.audio.state() : "unavailable";
-      const hint =
-        sound === "on" ? "M: silenciar el sonido"
-        : sound === "muted" ? "M: activar el sonido"
-        : sound === "unavailable" ? ""
-        : "Haz clic o pulsa una tecla para activar el sonido";
-      ctx.font = "11px system-ui, sans-serif";
-      ctx.fillStyle = "#cbd5e1";
-      ctx.fillText(hint, barX, 128);
-
-      drawEffectsPanel(ctx, panelW);
-    }
-
-    /** Efectos activos con su tiempo restante. */
-    function drawEffectsPanel(ctx, panelW) {
-      const rows = [];
-      if (g.balls.length > 1) {
-        rows.push({ label: "Bolas: " + g.balls.length, color: ITEM_COLORS.multiball, frac: 1 });
-      }
+      const right1 = [];
+      const tag = (text, color, steps) => {
+        const warn = steps <= 180 && (g.tick >> 3) % 2 === 1;
+        return {
+          opt: true,
+          w: textWidth(text, px) + 6 * px,
+          draw: (x, y) => drawTag(ctx, text, x, y, px, warn ? "#4a5570" : color)
+        };
+      };
       if (g.effects.wide > 0) {
-        rows.push({
-          label: "Barra grande · " + Math.ceil(g.effects.wide / 60) + " s",
-          color: ITEM_COLORS.wide,
-          frac: g.effects.wide / cfg.wideSteps
-        });
+        right1.push(tag("BARRA " + Math.ceil(g.effects.wide / 60) + "S", ITEM_COLORS.wide, g.effects.wide));
       }
       if (g.effects.laser > 0) {
-        rows.push({
-          label: "Láser (clic o Espacio) · " + Math.ceil(g.effects.laser / 60) + " s",
-          color: ITEM_COLORS.laser,
-          frac: g.effects.laser / cfg.laserSteps
+        right1.push(tag("LÁSER " + Math.ceil(g.effects.laser / 60) + "S", ITEM_COLORS.laser, g.effects.laser));
+      }
+
+      /* Fila 2 */
+      const left2 = [
+        field("DESTRUIDOS", String(s.destroyedTargets)),
+        field("RESTANTES", String(s.remainingTargets))
+      ];
+
+      if (barVariant < 2) {
+        const segs = barVariant === 0 ? 20 : 10;
+        const segW = (barVariant === 0 ? 3 : 5) * px;
+        const barW = segs * (segW + px) - px;
+        const filled = Math.floor((pct / 100) * segs + 1e-9);
+        left2.push({
+          opt: false,
+          w: adv("SUPERFICIE ") + barW + 3 * px + wid(pct + "%"),
+          draw: (x, y) => {
+            drawText(ctx, "SUPERFICIE", x, y, px, LABEL);
+            const bx = x + adv("SUPERFICIE ");
+            for (let i = 0; i < segs; i++) {
+              ctx.fillStyle = i < filled ? "#ffd166" : "#243049";
+              ctx.fillRect(bx + i * (segW + px), y, segW, 7 * px);
+            }
+            drawText(ctx, pct + "%", bx + barW + 3 * px, y, px, VALUE);
+          }
+        });
+      } else {
+        left2.push(field("SUPERFICIE", pct + "%"));
+      }
+
+      const right2 = [];
+      {
+        const on = g.reveal.on;
+        const text = on ? "B: BLOQUES ON" : "B: VER BLOQUES";
+        right2.push({
+          opt: true,
+          w: wid(text),
+          draw: (x, y) => drawText(ctx, text, x, y, px, on ? "#ff4d63" : LABEL)
         });
       }
-      if (!rows.length) return;
+      const snd = g.audio ? g.audio.state() : "unavailable";
+      let text = null;
+      let color = LABEL;
+      if (snd === "on") text = "M: SONIDO ON";
+      else if (snd === "muted") text = "M: SONIDO OFF";
+      else if (snd === "off" || snd === "locked") {
+        text = "CLIC: ACTIVAR SONIDO";
+        if ((g.tick >> 5) % 2 === 1) color = "#4a5570";
+      }
+      if (text) {
+        right2.push({ opt: true, w: wid(text), draw: (x, y) => drawText(ctx, text, x, y, px, color) });
+      }
 
-      const top = 14 + 142 + 8;
-      ctx.fillStyle = "rgba(12, 17, 27, 0.88)";
-      roundRectPath(ctx, 14, top, panelW, 12 + rows.length * 30, 12);
-      ctx.fill();
-
-      ctx.textBaseline = "top";
-      ctx.font = "bold 12px system-ui, sans-serif";
-      rows.forEach((row, i) => {
-        const y = top + 10 + i * 30;
-        ctx.fillStyle = "#ffffff";
-        ctx.fillText(row.label, 28, y);
-        ctx.fillStyle = "rgba(255,255,255,0.2)";
-        ctx.fillRect(28, y + 17, panelW - 28, 5);
-        ctx.fillStyle = row.color;
-        ctx.fillRect(28, y + 17, (panelW - 28) * clamp(row.frac, 0, 1), 5);
-      });
+      return { left1, right1, left2, right2 };
     }
 
+    /** Quita piezas opcionales (primero las de la derecha) hasta que la fila quepa. */
+    function fitRow(left, right, vw, ui) {
+      const margin = 8 * ui;
+      const gap = 12 * ui;
+      const L = left.slice();
+      const R = right.slice();
+      const sum = (l) => l.reduce((a, seg, i) => a + seg.w + (i ? gap : 0), 0);
+      const total = () => sum(L) + sum(R) + (L.length && R.length ? gap : 0);
+      const fits = () => total() <= vw - 2 * margin;
+      for (const list of [R, L]) {
+        for (let i = list.length - 1; i >= 0 && !fits(); i--) if (list[i].opt) list.splice(i, 1);
+      }
+      return { L, R, margin, gap, width: total(), fits: fits(), sum };
+    }
+
+    function drawBanner(ctx) {
+      const v = g.view;
+      const ui = v.ui;
+      ctx.setTransform(v.dpr, 0, 0, v.dpr, 0, 0);
+
+      ctx.fillStyle = "#0b1020";
+      ctx.fillRect(0, 0, v.vw, v.bannerH);
+      ctx.fillStyle = "#35d9ff";
+      ctx.fillRect(0, v.bannerH - 3 * ui, v.vw, ui);
+      ctx.fillStyle = "#ff2fa8";
+      ctx.fillRect(0, v.bannerH - ui, v.vw, ui);
+
+      const rowY = ui === 2 ? [10, 38] : [5, 18];
+      const info = { ui, height: v.bannerH, rows: [] };
+
+      let row2 = null;
+      let seg = null;
+      for (let variant = 0; variant < 3; variant++) {
+        seg = bannerSegments(ctx, ui, variant);
+        row2 = fitRow(seg.left2, seg.right2, v.vw, ui);
+        if (row2.fits) break;
+      }
+      const row1 = fitRow(seg.left1, seg.right1, v.vw, ui);
+
+      [[row1, rowY[0]], [row2, rowY[1]]].forEach(([row, y]) => {
+        let x = row.margin;
+        for (const part of row.L) {
+          part.draw(x, y);
+          x += part.w + row.gap;
+        }
+        if (row.R.length) {
+          x = v.vw - row.margin - row.sum(row.R);
+          for (const part of row.R) {
+            part.draw(x, y);
+            x += part.w + row.gap;
+          }
+        }
+        info.rows.push({ width: row.width, fits: row.fits, parts: row.L.length + row.R.length });
+      });
+      g.bannerInfo = info;
+
+      // Líneas de escaneo CRT sobre el banner.
+      if (g.patterns && g.patterns.scan) {
+        ctx.fillStyle = g.patterns.scan;
+        ctx.fillRect(0, 0, v.vw, v.bannerH - 3 * ui);
+      }
+    }
+
+    function drawFrame(ctx) {
+      const v = g.view;
+      const x = v.offsetX;
+      const y = v.offsetY;
+      const w = W * v.scale;
+      const h = H * v.scale;
+      ctx.setTransform(v.dpr, 0, 0, v.dpr, 0, 0);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#35d9ff";
+      ctx.strokeRect(x - 2, y - 2, w + 4, h + 4);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "#ff2fa8";
+      ctx.strokeRect(x - 5.5, y - 5.5, w + 11, h + 11);
+    }
+
+    /** Pantalla final en espacio de pantalla, centrada en el tablero. */
     function drawOverlay(ctx) {
       if (g.state === "playing") return;
-      ctx.fillStyle = "rgba(0, 0, 0, 0.76)";
-      ctx.fillRect(0, 0, W, H);
+      const v = g.view;
+      const bw = W * v.scale;
+      const bh = H * v.scale;
+      const cx = v.offsetX + bw / 2;
+      const cy = v.offsetY + bh / 2;
+      ctx.setTransform(v.dpr, 0, 0, v.dpr, 0, 0);
 
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "bold 42px system-ui, sans-serif";
-      ctx.fillText(g.state === "won" ? "¡HAS DESTRUIDO LA PÁGINA!" : "GAME OVER", W / 2, H / 2 - 48);
-      ctx.font = "20px system-ui, sans-serif";
-      ctx.fillText("Puntuación: " + g.score, W / 2, H / 2);
-      ctx.font = "16px system-ui, sans-serif";
-      ctx.fillStyle = "#ffd166";
-      ctx.fillText("Haz clic o pulsa R para volver a jugar · Escape para salir", W / 2, H / 2 + 42);
-      ctx.textAlign = "start";
+      ctx.fillStyle = "rgba(5, 8, 18, 0.78)";
+      ctx.fillRect(v.offsetX, v.offsetY, bw, bh);
+
+      const fit = (text, start) => {
+        let px = start;
+        while (px > 1 && textWidth(text, px) > bw - 24) px--;
+        return px;
+      };
+      const title = g.state === "won" ? "¡PÁGINA DESTRUIDA!" : "GAME OVER";
+      const tpx = fit(title, v.ui === 2 ? 6 : 3);
+      drawText(ctx, title, cx - textWidth(title, tpx) / 2, cy - 7 * tpx - 10, tpx, g.state === "won" ? "#ffd166" : "#ff3b4e", "#3a0f18");
+
+      const scoreText = "PUNTUACIÓN " + String(g.score).padStart(6, "0");
+      const spx = fit(scoreText, v.ui === 2 ? 3 : 2);
+      drawText(ctx, scoreText, cx - textWidth(scoreText, spx) / 2, cy + 6, spx, "#ffffff");
+
+      if ((g.tick >> 4) % 2 === 0) {
+        const prompt = "CLIC O R: JUGAR - ESC: SALIR";
+        const ppx = fit(prompt, v.ui === 2 ? 2 : 1);
+        drawText(ctx, prompt, cx - textWidth(prompt, ppx) / 2, cy + 6 + 7 * spx + 18, ppx, "#35d9ff");
+      }
     }
 
     function draw() {
       const ctx = g.ctx;
       const v = g.view;
 
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.fillStyle = cfg.destroyColor;
-      ctx.fillRect(0, 0, g.canvas.width, g.canvas.height);
+      // Fondo retro (puntos) en toda la ventana, también en los márgenes.
+      ctx.setTransform(v.dpr, 0, 0, v.dpr, 0, 0);
+      ctx.fillStyle = g.patterns.dots;
+      ctx.fillRect(0, 0, v.vw, v.vh);
 
+      // Tablero: la página capturada, escalada y recortada a su marco.
       ctx.setTransform(v.dpr * v.scale, 0, 0, v.dpr * v.scale, v.dpr * v.offsetX, v.dpr * v.offsetY);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, W, H);
+      ctx.clip();
+      ctx.fillStyle = cfg.destroyColor;
+      ctx.fillRect(0, 0, W, H);
       sceneLayer.draw(ctx, 0, 0, W, H);
-
+      drawReveal(ctx);
       drawFragments(ctx);
       drawDust(ctx);
       drawItems(ctx);
       drawBolts(ctx);
       drawPaddle(ctx);
       drawBalls(ctx);
-      drawHud(ctx);
+      drawToasts(ctx);
+      drawLaunchPrompt(ctx);
+      ctx.restore();
+
+      drawFrame(ctx);
+      drawBanner(ctx);
       drawOverlay(ctx);
     }
 
@@ -955,6 +1393,17 @@ function drawPaddle(ctx) {
         if (!event.repeat && g.audio) g.audio.toggleMute();
         return;
       }
+      if (key === "b") {
+        if (!event.repeat) {
+          g.reveal.on = !g.reveal.on;
+          g.reveal.dirty = true;
+        }
+        return;
+      }
+      if (key === " ") {
+        if (!event.repeat) launchBall();
+        return;
+      }
       if (key === "r") {
         if (!event.repeat) restart();
         return;
@@ -975,15 +1424,7 @@ function drawPaddle(ctx) {
       if (event.target !== g.canvas) return;
       event.stopPropagation();
       if (event.type === "mousedown" || event.type === "pointerdown") unlockAudio();
-      // Clic izquierdo = disparo (solo si el láser está activo).
-      if (event.type === "mousedown" && event.button === 0 && g.state === "playing") {
-        g.firing = true;
-        fireLaser();
-      }
-    }
-
-    function onMouseUp() {
-      g.firing = false;
+      if (event.type === "mousedown" && event.button === 0) launchBall();
     }
 
     function onClick(event) {
@@ -994,6 +1435,7 @@ function drawPaddle(ctx) {
         restart();
         return;
       }
+      launchBall();
       if (toStageY(event.clientY) >= paddleY() - 50) {
         g.mouseX = toStageX(event.clientX);
         g.inputMode = "mouse";
@@ -1006,14 +1448,10 @@ function drawPaddle(ctx) {
       if (!t) return;
       g.inputMode = "mouse";
       g.mouseX = toStageX(t.clientX);
-      if (event.type === "touchstart" && g.state === "playing") {
-        g.firing = true;
-        fireLaser();
-      }
+      if (event.type === "touchstart") launchBall();
     }
 
     function onTouchEnd() {
-      g.firing = false;
       unlockAudio();
     }
 
@@ -1023,7 +1461,6 @@ function drawPaddle(ctx) {
 
     function onBlur() {
       g.keys.clear();
-      g.firing = false;
     }
 
     function attach() {
@@ -1035,7 +1472,6 @@ function drawPaddle(ctx) {
       for (const type of ["mousedown", "mouseup", "pointerdown", "pointerup", "dblclick", "auxclick"]) {
         listen(window, type, swallow, true);
       }
-      listen(window, "mouseup", onMouseUp, true);
       listen(window, "wheel", onWheel, { capture: true, passive: false });
       listen(window, "touchstart", onTouch, { capture: true, passive: false });
       listen(window, "touchmove", onTouch, { capture: true, passive: false });
@@ -1085,6 +1521,8 @@ function drawPaddle(ctx) {
       g.nextPowerup = cfg.powerupEvery;
       g.bag = [];
       g.spawned = 0;
+      g.tick = 0;
+      g.toasts = [];
       resetPowerups();
 
       g.audio = options.audio !== undefined ? options.audio : WB.Audio ? WB.Audio.create() : null;
@@ -1121,12 +1559,16 @@ function drawPaddle(ctx) {
       g.audio = null;
 
       g.keys.clear();
-      g.firing = false;
       g.fragments = [];
       g.dust = [];
       g.balls = [];
       g.items = [];
       g.bolts = [];
+      g.toasts = [];
+      g.patterns = null;
+      g.reveal.layer = null;
+      g.reveal.sharp = null;
+      g.reveal.dirty = true;
     }
 
     function exit() {
@@ -1141,6 +1583,7 @@ function drawPaddle(ctx) {
           score: g.score,
           lives: g.lives,
           balls: g.balls.length,
+          waiting: waitingForLaunch(),
           wideSeconds: Math.ceil(g.effects.wide / 60),
           laserSeconds: Math.ceil(g.effects.laser / 60)
         },
@@ -1179,7 +1622,13 @@ function drawPaddle(ctx) {
         spawnItem,
         addBolt(x, y) { g.bolts.push({ x, y }); },
         fire: fireLaser,
-        press(down) { g.firing = Boolean(down); }
+        get banner() { return g.bannerInfo; },
+        get reveal() { return g.reveal.on; },
+        get waiting() { return waitingForLaunch(); },
+        launch: launchBall,
+        setReveal(v) { g.reveal.on = Boolean(v); g.reveal.dirty = true; },
+        get toasts() { return g.toasts; },
+        get flash() { return g.flash; }
       }
     };
   }
