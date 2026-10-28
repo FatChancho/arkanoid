@@ -10,7 +10,7 @@ Extensión de Chrome (Manifest V3) que convierte la página actual en un escenar
 - **Sin daños colaterales**: cada región pertenece a un único objetivo (el de la capa más alta). Destruir una imagen no borra el titular que está encima.
 - **Fragmentos** con la textura y los colores de la captura original, que se mueven y se desvanecen.
 - **Banner retro fuera del tablero**: puntos, vidas, objetivos destruidos y restantes, porcentaje de superficie destruida (sin contar dos veces las zonas solapadas) y efectos activos con su tiempo, en una franja superior con tipografía de píxeles. No tapa la página: el tablero se escala para caber debajo, dentro de un marco neón.
-- **Objetos que caen según la puntuación** (power-ups): bola triple, barra grande y láser automático. Ver «Objetos» más abajo.
+- **Objetos que caen según la puntuación** (power-ups): bola triple, barra grande, láser automático y bola grande. Ver «Objetos» más abajo.
 - **Saque con clic**: la bola espera pegada a la pala (con un aviso «CLIC PARA LANZAR») y no se mueve hasta que haces clic. También con `Espacio` o tocando la pantalla.
 - **Revelar bloques (`B`)**: resalta en rojo, con halo desenfocado, lo que queda por destruir. Útil cuando quedan pocos.
 - **Aspecto arcade**: pala con contorno oscuro y extremos de color, bola y cápsulas con contorno (se ven sobre páginas claras y oscuras), avisos flotantes y destello al recoger un objeto.
@@ -72,12 +72,13 @@ Errores contemplados: página no permitida, fallo de captura, fallo de inyecció
 
 ## Objetos (power-ups)
 
-Cada **60 puntos** cae una cápsula desde el punto del impacto que cruzó el umbral (10 puntos por región destruida, +20 al terminar un objetivo de varias regiones). Los tipos salen de una bolsa barajada: cada tres cápsulas aparecen los tres tipos, en orden aleatorio. Se recogen con la pala; si caen fuera no pasa nada.
+Cada **150 puntos** cae una cápsula desde el punto del impacto que cruzó el umbral (10 puntos por región destruida, +20 al terminar un objetivo de varias regiones). Medido con un bot que recoge casi todo: unos 3 objetos en una página de 40 regiones y 1 en una de 14. Los tipos salen de una bolsa barajada que se rellena cada 4 cápsulas, así que en cada bolsa aparecen los cuatro tipos en orden aleatorio (al enlazar dos bolsas, el último y el primero pueden repetirse). Se recogen con la pala; si caen fuera no pasa nada.
 
 | Cápsula | Efecto |
 |---|---|
 | Tres puntos (amarilla) | **Bola triple**: cada bola se divide en tres (±22°), hasta un máximo de 9. Perder una bola no cuesta vida; solo se pierde una vida al perder la última. |
 | Flecha doble (azul) | **Barra grande**: la pala pasa de 110 a 190 px durante 20 s. |
+| Círculo (verde) | **Bola grande**: el radio de todas las bolas pasa de 7 a 13 px durante 20 s, también el de las que nazcan mientras dure (por ejemplo con una bola triple). Crece y vuelve a su tamaño poco a poco. Toca los bloques unos 6 px antes y es más fácil de recoger con la pala, pero sigue destruyendo una sola región por contacto. |
 | Dos barras (roja) | **Láser automático** durante 15 s: sin pulsar nada, dispara 2 proyectiles desde los extremos de la pala cada 24 pasos (0,4 s). Cada proyectil destruye como mucho una región, igual que la pelota, y puntúa igual. |
 
 - Recoger un objeto del mismo tipo reinicia su temporizador (no se acumulan).
@@ -85,7 +86,7 @@ Cada **60 puntos** cae una cápsula desde el punto del impacto que cruzó el umb
 - El banner muestra el número de bolas y el tiempo restante de cada efecto (parpadea en los últimos 3 s).
 - Al recoger un objeto, la pala destella y aparece un aviso flotante («BARRA GRANDE», «BOLA TRIPLE», «LÁSER AUTOMÁTICO»).
 - Equilibrio: el láser acorta mucho las partidas, sobre todo si cae pronto. Si te parece excesivo, baja `laserSteps` o sube `laserCooldownSteps` en `CONFIG`.
-- Todos los valores (`powerupEvery`, duraciones, `maxBalls`, ancho de la barra grande, enfriamiento...) están en `CONFIG` al inicio de `game.js`; `powerupEvery: 0` desactiva los objetos.
+- Todos los valores (`powerupEvery`, duraciones, `maxBalls`, `bigBallRadius`, ancho de la barra grande, enfriamiento...) están en `CONFIG` al inicio de `game.js`; `powerupEvery: 0` desactiva los objetos. Para más o menos objetos, sube o baja `powerupEvery`: con 60 caían unos 9 en una página de 40 regiones; con 200 una página pequeña se queda sin ninguno.
 
 ## Sonido y política de autoplay
 

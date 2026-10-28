@@ -46,12 +46,17 @@
  * destruye algo.
  *
  * OBJETOS (POWER-UPS)
- * Cada `powerupEvery` puntos (60 por defecto) cae un objeto desde el lugar del
- * impacto que cruzó el umbral. Los tipos salen de una "bolsa" barajada, así
- * que cada tres objetos aparecen los tres tipos:
+ * Cada `powerupEvery` puntos (150 por defecto: unos 3 objetos en una página de
+ * 40 regiones, 1 en una de 14) cae un objeto desde el lugar del impacto que
+ * cruzó el umbral. Los tipos salen de una "bolsa" barajada, así que cada
+ * cuatro objetos aparecen los cuatro tipos:
  *   - multiball: cada pelota se triplica (±22° respecto a su trayectoria),
  *                hasta `maxBalls` pelotas.
  *   - wide:      la pala pasa de 110 a 190 px durante 20 s.
+ *   - bigball:   el radio de TODAS las bolas pasa de 7 a 13 px durante 20 s
+ *                (también el de las que nazcan mientras dure). Toca antes los
+ *                bloques y es más fácil de recoger con la pala; sigue
+ *                destruyendo una sola región por contacto.
  *   - laser:     durante 15 s dispara SOLO, sin pulsar nada: dos proyectiles
  *                desde los extremos de la pala cada 24 pasos (0,4 s). Cada
  *                proyectil destruye como mucho una región, igual que la
@@ -71,7 +76,7 @@
     paddleBottom: 28,
     paddleSpeed: 7,
     ballRadius: 7,
-    ballSpeed: 12,
+    ballSpeed: 10,
     maxLives: 3,
     serveDelaySteps: 40,
     serveWaitsForClick: true,
@@ -90,7 +95,7 @@
     canvasId: "webbreakout-game-canvas",
 
     // Objetos
-    powerupEvery: 60,
+    powerupEvery: 100,
     itemFallSpeed: 2.6,
     itemWidth: 36,
     itemHeight: 18,
@@ -99,6 +104,9 @@
     wideSteps: 1200,
     laserSteps: 900,
     maxBalls: 9,
+    bigBallRadius: 20,
+    bigBallSteps: 1200,
+    ballEase: 0.25,
     splitAngle: 0.38,
     laserCooldownSteps: 24,
     boltSpeed: 11,
@@ -109,9 +117,9 @@
   const STEP_MS = 1000 / 60;
   const GAME_KEYS = new Set(["ArrowLeft", "ArrowRight", " ", "a", "d", "r", "m", "b"]);
 
-  const ITEM_TYPES = ["multiball", "wide", "laser"];
-  const ITEM_COLORS = { multiball: "#ffd166", wide: "#35d9ff", laser: "#ff5d73" };
-  const ITEM_LABELS = { multiball: "BOLA TRIPLE", wide: "BARRA GRANDE", laser: "LÁSER AUTOMÁTICO" };
+  const ITEM_TYPES = ["multiball", "wide", "laser", "bigball"];
+  const ITEM_COLORS = { multiball: "#ffd166", wide: "#35d9ff", laser: "#ff5d73", bigball: "#5be37d" };
+  const ITEM_LABELS = { multiball: "BOLA TRIPLE", wide: "BARRA GRANDE", laser: "LÁSER AUTOMÁTICO", bigball: "BOLA GRANDE" };
 
   function clamp(v, lo, hi) {
     return v < lo ? lo : v > hi ? hi : v;
@@ -264,7 +272,7 @@
       balls: [],
       items: [],
       bolts: [],
-      effects: { wide: 0, laser: 0 },
+      effects: { wide: 0, laser: 0, big: 0 },
       cooldown: 0,
       tick: 0,
       flash: { steps: 0, color: "#ffffff" },
@@ -275,6 +283,7 @@
       nextPowerup: cfg.powerupEvery,
       bag: [],
       spawned: 0,
+      spawnLog: [],
       lastBoltHit: null,
       keys: new Set(),
       audio: null,
@@ -394,15 +403,19 @@
 
     /* ---------------- Estado ---------------- */
 
+    function ballRadiusTarget() {
+      return g.effects.big > 0 ? cfg.bigBallRadius : cfg.ballRadius;
+    }
+
     function newBall(x, y, vx, vy) {
-      return { x, y, vx, vy, r: cfg.ballRadius, serve: 0, lock: 0, lost: false };
+      return { x, y, vx, vy, r: ballRadiusTarget(), serve: 0, lock: 0, lost: false };
     }
 
     function spawnBall() {
       const angle = (Math.random() - 0.5) * 1.0;
       const b = newBall(
         g.paddleX,
-        paddleY() - cfg.ballRadius - 1,
+        paddleY() - ballRadiusTarget() - 1,
         Math.sin(angle) * cfg.ballSpeed,
         -Math.cos(angle) * cfg.ballSpeed
       );
@@ -434,6 +447,7 @@
       g.bolts = [];
       g.effects.wide = 0;
       g.effects.laser = 0;
+      g.effects.big = 0;
       g.cooldown = 0;
       g.flash.steps = 0;
       g.paddleW = cfg.paddleWidth;
@@ -574,6 +588,7 @@
         y
       });
       g.spawned++;
+      g.spawnLog.push(type); // para pruebas: orden real de creación
     }
 
     /** Cae un objeto cada vez que la puntuación cruza un múltiplo de powerupEvery. */
@@ -594,6 +609,7 @@
           const cos = Math.cos(a);
           const sin = Math.sin(a);
           const clone = newBall(b.x, b.y, b.vx * cos - b.vy * sin, b.vx * sin + b.vy * cos);
+          clone.r = b.r; // hereda el radio actual (puede estar a medio crecer)
           normalizeBall(clone);
           g.balls.push(clone);
         }
@@ -603,6 +619,7 @@
     function collectItem(type) {
       if (type === "multiball") splitBalls();
       else if (type === "wide") g.effects.wide = cfg.wideSteps;
+      else if (type === "bigball") g.effects.big = cfg.bigBallSteps;
       else if (type === "laser") {
         g.effects.laser = cfg.laserSteps;
         g.cooldown = 0;
@@ -642,6 +659,7 @@
     function updateTimers() {
       if (g.effects.wide > 0) g.effects.wide--;
       if (g.effects.laser > 0) g.effects.laser--;
+      if (g.effects.big > 0) g.effects.big--;
       if (g.cooldown > 0) g.cooldown--;
     }
 
@@ -807,12 +825,18 @@
     function stepBalls() {
       const n = Math.max(1, Math.ceil(cfg.ballSpeed / cfg.maxSubstepDistance));
 
+      const targetR = ballRadiusTarget();
       for (const b of g.balls.slice()) {
         if (g.state !== "playing") return;
+
+        // El radio se acerca a su valor objetivo en unos 15 pasos.
+        b.r += (targetR - b.r) * cfg.ballEase;
+        if (Math.abs(targetR - b.r) < 0.15) b.r = targetR;
 
         if (b.serve > 0) {
           b.serve--;
           b.x = g.paddleX;
+          b.y = paddleY() - b.r - 1;
           continue;
         }
         for (let i = 0; i < n; i++) {
@@ -874,6 +898,10 @@
           ctx.arc(dx, 0, 2.8, 0, Math.PI * 2);
           ctx.fill();
         }
+      } else if (type === "bigball") {
+        ctx.beginPath();
+        ctx.arc(0, 0, 5.5, 0, Math.PI * 2);
+        ctx.fill();
       } else if (type === "wide") {
         ctx.beginPath();
         ctx.moveTo(-10, 0);
@@ -1074,8 +1102,9 @@
         ctx.beginPath();
         ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
         ctx.fill();
+        const hl = Math.max(3, Math.round(b.r * 0.42));
         ctx.fillStyle = "rgba(255,255,255,0.75)";
-        ctx.fillRect(b.x - 3, b.y - 4, 3, 3);
+        ctx.fillRect(b.x - b.r * 0.45, b.y - b.r * 0.55, hl, hl);
       }
     }
 
@@ -1165,6 +1194,9 @@
       }
       if (g.effects.laser > 0) {
         right1.push(tag("LÁSER " + Math.ceil(g.effects.laser / 60) + "S", ITEM_COLORS.laser, g.effects.laser));
+      }
+      if (g.effects.big > 0) {
+        right1.push(tag("BOLA GRANDE " + Math.ceil(g.effects.big / 60) + "S", ITEM_COLORS.bigball, g.effects.big));
       }
 
       /* Fila 2 */
@@ -1521,6 +1553,7 @@
       g.nextPowerup = cfg.powerupEvery;
       g.bag = [];
       g.spawned = 0;
+      g.spawnLog = [];
       g.tick = 0;
       g.toasts = [];
       resetPowerups();
@@ -1585,7 +1618,8 @@
           balls: g.balls.length,
           waiting: waitingForLaunch(),
           wideSeconds: Math.ceil(g.effects.wide / 60),
-          laserSeconds: Math.ceil(g.effects.laser / 60)
+          laserSeconds: Math.ceil(g.effects.laser / 60),
+          bigSeconds: Math.ceil(g.effects.big / 60)
         },
         engine.stats()
       );
@@ -1607,6 +1641,7 @@
         get bolts() { return g.bolts; },
         get effects() { return g.effects; },
         get spawned() { return g.spawned; },
+        get spawnLog() { return g.spawnLog; },
         get lastBoltHit() { return g.lastBoltHit; },
         get paddleW() { return g.paddleW; },
         get cooldown() { return g.cooldown; },
