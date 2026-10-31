@@ -95,7 +95,7 @@
     canvasId: "webbreakout-game-canvas",
 
     // Objetos
-    powerupEvery: 100,
+    powerupEvery: 150,
     itemFallSpeed: 2.6,
     itemWidth: 36,
     itemHeight: 18,
@@ -104,7 +104,7 @@
     wideSteps: 1200,
     laserSteps: 900,
     maxBalls: 9,
-    bigBallRadius: 20,
+    bigBallRadius: 13,
     bigBallSteps: 1200,
     ballEase: 0.25,
     splitAngle: 0.38,
@@ -468,6 +468,7 @@
       resetPowerups();
       spawnBall();
       setCursor();
+      sfx("playMusic", "game");
     }
 
     function loseLife() {
@@ -478,6 +479,7 @@
         g.state = "gameover";
         g.balls = [];
         setCursor();
+        sfx("playMusic", "gameover"); // la marcha fúnebre sustituye a la música de juego
         return;
       }
       spawnBall();
@@ -1510,6 +1512,12 @@
       listen(window, "touchend", onTouchEnd, true);
       listen(window, "touchcancel", onTouchEnd, true);
       listen(window, "blur", onBlur);
+      listen(document, "visibilitychange", onVisibility);
+    }
+
+    /** Pestaña oculta: el bucle se detiene, y el audio también. */
+    function onVisibility() {
+      sfx("setHidden", document.hidden);
     }
 
     /* ---------------- Ciclo de vida ---------------- */
@@ -1560,6 +1568,7 @@
 
       g.audio = options.audio !== undefined ? options.audio : WB.Audio ? WB.Audio.create() : null;
       if (g.audio) g.audio.tryStart();
+      sfx("playMusic", "game");
 
       createCanvas();
       resize();
@@ -1619,7 +1628,8 @@
           waiting: waitingForLaunch(),
           wideSeconds: Math.ceil(g.effects.wide / 60),
           laserSeconds: Math.ceil(g.effects.laser / 60),
-          bigSeconds: Math.ceil(g.effects.big / 60)
+          bigSeconds: Math.ceil(g.effects.big / 60),
+          music: g.audio && typeof g.audio.musicState === "function" ? g.audio.musicState() : "none"
         },
         engine.stats()
       );

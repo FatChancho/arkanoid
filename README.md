@@ -14,6 +14,7 @@ Extensión de Chrome (Manifest V3) que convierte la página actual en un escenar
 - **Saque con clic**: la bola espera pegada a la pala (con un aviso «CLIC PARA LANZAR») y no se mueve hasta que haces clic. También con `Espacio` o tocando la pantalla.
 - **Revelar bloques (`B`)**: resalta en rojo, con halo desenfocado, lo que queda por destruir. Útil cuando quedan pocos.
 - **Aspecto arcade**: pala con contorno oscuro y extremos de color, bola y cápsulas con contorno (se ven sobre páginas claras y oscuras), avisos flotantes y destello al recoger un objeto.
+- **Música**: *Arcade Kid* de fondo mientras juegas (en bucle) y una marcha fúnebre de 8 bits en el Game Over. Ver «Música».
 - **Sonido sintetizado** (Web Audio, sin archivos de audio): un rebote distinto para pared, pala y objetivo, y una explosión por cada región que se rompe, más larga y grave cuanto más área rompe el impacto. Tecla `M` para silenciar.
 - Pelota a velocidad constante con paso de física fijo (independiente de los Hz del monitor), 3 vidas, Game Over, victoria y reinicio.
 - Controles: ratón o táctil; flechas / `A` `D`; **clic, `Espacio` o toque: lanzar la bola**; **`B`: revelar bloques**; `R` reinicia; `M` sonido; `Esc` sale; clic para reiniciar tras Game Over o victoria.
@@ -36,7 +37,8 @@ Extensión de Chrome (Manifest V3) que convierte la página actual en un escenar
 ├── content.js        Orquestador en la página: protocolo de mensajes, arranque y limpieza
 ├── scene.js          Detección y agrupación de objetivos (solo lectura del DOM)
 ├── destruction.js    Máscaras, regiones, colisión, capa del escenario y muestreo de colores
-├── audio.js          Efectos de sonido sintetizados (rebotes y explosiones)
+├── audio.js          Efectos de sonido sintetizados y reproductor de música
+├── music/            arcade-kid.mp3 y marcha-funebre.mp3 (se cargan desde la extensión)
 └── game.js           Pelota, pala, vidas, entrada, efectos, HUD y ciclo de vida
 ```
 
@@ -88,6 +90,23 @@ Cada **150 puntos** cae una cápsula desde el punto del impacto que cruzó el um
 - Equilibrio: el láser acorta mucho las partidas, sobre todo si cae pronto. Si te parece excesivo, baja `laserSteps` o sube `laserCooldownSteps` en `CONFIG`.
 - Todos los valores (`powerupEvery`, duraciones, `maxBalls`, `bigBallRadius`, ancho de la barra grande, enfriamiento...) están en `CONFIG` al inicio de `game.js`; `powerupEvery: 0` desactiva los objetos. Para más o menos objetos, sube o baja `powerupEvery`: con 60 caían unos 9 en una página de 40 regiones; con 200 una página pequeña se queda sin ninguno.
 
+## Música
+
+- **Mientras juegas**: *Arcade Kid* (128 s) en bucle. Al **perder la última vida** se funde con la **marcha fúnebre** (5 s, suena una vez y no se repite). Al **reiniciar** vuelve *Arcade Kid*. Perder una vida que no es la última no cambia la música, y en la victoria sigue la música de juego.
+- **`M`** silencia música y efectos a la vez. Con la pestaña oculta el audio se pausa y se reanuda al volver, igual que el bucle del juego.
+- **Mezcla**: la marcha viene masterizada unos 8 dB más fuerte que *Arcade Kid* (−7,8 frente a −15,8 LUFS, con picos en 0 dBFS), así que cada pista tiene su ganancia (`MUSIC` en `audio.js`). Medido sobre los archivos reales: el fondo queda en ≈ −30 dBFS de RMS y la marcha en ≈ −17 dBFS, sin recortes. **Los efectos sobresalen ≥ 8 dB sobre la música en su banda de frecuencias** (rebotes, láser, recoger objeto); si subes la ganancia del fondo, vuelve a comprobarlo para no tapar los rebotes.
+- **Carga**: los MP3 van dentro de la extensión (`music/`, declarados en `web_accessible_resources` del manifest). Se cargan con `fetch` desde el content script y se reproducen con Web Audio, no con un `<audio>`: así funciona incluso en páginas con una política CSP estricta (probado con `default-src 'none'`). La carga es perezosa (al empezar a jugar) y se decodifica a 32 kHz para ocupar unos **32 MB** en la pestaña (49 MB a 48 kHz); se liberan al salir.
+- **Autoplay**: como con los efectos, Chrome no deja sonar hasta que haces clic o pulsas una tecla en la página. La música empieza en cuanto eso ocurre; el primer clic (que lanza la bola) basta.
+- **Bucle**: *Arcade Kid* tiene ~0,8 s de silencio al principio y ~1 s al final, así que en la costura del bucle hay una pausa natural.
+- Si falla la carga (archivo ausente, CSP que bloquee la extensión...), el juego sigue sin música y con efectos.
+
+### Créditos de la música
+
+- **Arcade Kid** («Slower Tempo», 2020-04-24): David Renda, FesliyanStudios.com (según el nombre del archivo y sus etiquetas).
+- **Marcha fúnebre 8 bits**: «composiia» (según el nombre del archivo).
+
+No he podido comprobar sus licencias. Revisa las condiciones de uso de cada una (por ejemplo, si exigen atribución) antes de publicar o distribuir la extensión.
+
 ## Sonido y política de autoplay
 
 Chrome no deja sonar a una página hasta que el usuario interactúa con ella (un clic o una tecla; mover el ratón no cuenta), y pulsar el botón del popup **no** cuenta como interacción con la página. Por eso:
@@ -108,6 +127,7 @@ Chrome no deja sonar a una página hasta que el usuario interactúa con ella (un
 - **Orden de pintado aproximado**: las capas son por tipo (fondo < imagen < tarjeta < logo/control < texto), no el `z-index` real.
 - **No se recorre Shadow DOM**, ni pseudo-elementos (`::before/::after`) ni fuentes de iconos. El contenido de `iframe` se trata como una sola pieza.
 - **Tablero algo más pequeño**: para dejar sitio al banner, la página capturada se reduce un 7-11 % (64 px de banner en ventanas de 1000 px o más de ancho; 34 px en las más estrechas). Al redimensionar la ventana, la captura no se puede repetir desde la página, así que el tablero se vuelve a escalar uniformemente (con barras oscuras si cambia la proporción) en lugar de recalcular los objetivos.
+- **Tamaño de la extensión**: los dos MP3 suman unos 5,3 MB. Al declararlos como `web_accessible_resources` para `<all_urls>`, cualquier web puede detectar que la extensión está instalada (es la limitación habitual de este mecanismo).
 - **Tipografía del banner**: fuente de píxeles propia, solo mayúsculas, dígitos y la puntuación necesaria (con acentos Á É Í Ó Ú). En ventanas muy estrechas el banner descarta lo opcional (tag de láser, bolas, aviso de sonido) y, si hace falta, acorta o quita la barra de progreso.
 - El overlay captura el ratón y las teclas del juego mientras está activo; la página no recibe esos eventos.
 - Se recorren como máximo 30 000 elementos del DOM.

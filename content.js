@@ -133,7 +133,8 @@
       destroyedTargets: s.destroyedTargets,
       remainingTargets: s.remainingTargets,
       totalTargets: s.totalTargets,
-      percentDestroyed: s.percentDestroyed
+      percentDestroyed: s.percentDestroyed,
+      music: s.music
     };
   }
 
@@ -183,6 +184,8 @@
   window.__webBreakout = {
     startGame,
     stopGame,
-    getStatus
+    getStatus,
+    // Solo visible desde el mundo aislado de la extensión (la página no lo ve); lo usan las pruebas.
+    getGame: () => (session ? session.game : null)
   };
 })();

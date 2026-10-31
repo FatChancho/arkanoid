@@ -8,6 +8,11 @@
  *   explosion(i)       i en [0.15, 1]: más grande = más larga y más grave.
  *   laser()            "pew" corto al disparar.
  *   pickup()           arpegio ascendente al recoger un objeto.
+ *   playMusic(kind)    "game" (Arcade Kid, en bucle) | "gameover" (marcha fúnebre, una vez).
+ *   stopMusic()        desvanece y para la música.
+ *   musicState()       "idle" | "loading" | "waiting" | "playing:game" | "playing:gameover" |
+ *                      "error" | "disabled" | "off".
+ *   setHidden(bool)    pausa/reanuda el audio con la visibilidad de la pestaña.
  *   toggleMute()       silencia / activa (tecla M en el juego).
  *   state()            "off" | "locked" | "on" | "muted" | "unavailable".
  *   tryStart()         crea el contexto solo si la página ya tuvo interacción.
@@ -22,6 +27,26 @@
  * clic/tecla del juego. Mientras tanto state() devuelve "off"/"locked" y el
  * HUD avisa al jugador. Nunca se encolan sonidos mientras el contexto está
  * suspendido, para que no suenen todos de golpe al reanudarse.
+ *
+ * MÚSICA
+ * Los dos MP3 van dentro de la extensión (music/, declarados como
+ * web_accessible_resources). Se cargan con fetch desde el content script, se
+ * decodifican a 32 kHz en un OfflineAudioContext (ocupan ~31 MB y ~1 MB; a
+ * 48 kHz serían 49 MB) y se reproducen con AudioBufferSourceNode a través de la
+ * misma mezcla maestra que los efectos, así que `M` también la silencia y el
+ * limitador la cubre. No se usa un <audio>: un elemento de medios estaría
+ * sujeto al `media-src` de la CSP de cada página, mientras que fetch desde el
+ * mundo aislado de la extensión funciona incluso con `default-src 'none'`.
+ *  - La carga es perezosa (al pedir la primera pista) y no necesita
+ *    AudioContext, así que puede empezar antes del primer gesto del usuario.
+ *  - Cada pista tiene su ganancia: la marcha fúnebre está masterizada ~8 dB
+ *    más fuerte (-7,8 LUFS, picos en 0 dBFS) que Arcade Kid (-15,8 LUFS).
+ *  - La música NO debe tapar los efectos: con el fondo a su nivel actual cada
+ *    efecto sobresale ~8 dB o más sobre la música en su banda de frecuencias
+ *    (medido). Si subes `gain` de "game", comprueba antes que no tapa los rebotes.
+ *  - Arcade Kid lleva ~0,8 s de silencio al principio y ~1 s al final, así
+ *    que en el bucle hay una pausa natural en la costura.
+ *  - Al cambiar de pista hay un fundido cruzado corto.
  *
  * LÍMITES
  * Máximo de voces simultáneas, separación mínima entre rebotes, atenuación
@@ -44,6 +69,25 @@
     minBounceGap: 0.03
   };
 
+  // Pistas: ganancia propia para igualar la sonoridad percibida (ver cabecera).
+  const MUSIC = {
+    game: { file: "music/arcade-kid.mp3", gain: 0.28, loop: true, fadeIn: 0.6 },
+    gameover: { file: "music/marcha-funebre.mp3", gain: 0.4, loop: false, fadeIn: 0.05 }
+  };
+  const MUSIC_RATE = 32000;
+
+  function extensionUrl(path) {
+    const rt = globalThis.chrome && globalThis.chrome.runtime;
+    return rt && typeof rt.getURL === "function" ? rt.getURL(path) : path;
+  }
+
+  function defaultLoader(kind) {
+    return fetch(extensionUrl(MUSIC[kind].file)).then((res) => {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.arrayBuffer();
+    });
+  }
+
   function clamp(v, lo, hi) {
     return v < lo ? lo : v > hi ? hi : v;
   }
@@ -58,6 +102,10 @@
       explosion: noop,
       laser: noop,
       pickup: noop,
+      playMusic: noop,
+      stopMusic: noop,
+      setHidden: noop,
+      musicState: () => "disabled",
       setMuted: noop,
       toggleMute: () => false,
       isMuted: () => false,
@@ -81,6 +129,18 @@
     let bounceVoices = 0;
     let lastBounce = -1;
     let lastLaser = -1;
+
+    // Música
+    const musicOpts = opts.music === false ? null : opts.music || {};
+    const loader = (musicOpts && musicOpts.loader) || defaultLoader;
+    const buffers = {};
+    let wanted = null;
+    let current = null;
+    let lastFinished = null;
+    let loading = null;
+    let loaded = false;
+    let musicError = null;
+    let hiddenSuspended = false;
 
     function build() {
       master = ctx.createGain();
@@ -123,6 +183,7 @@
           return false;
         }
         build();
+        ctx.onstatechange = () => syncMusic();
       }
       return true;
     }
@@ -141,6 +202,7 @@
       if (disposed) return;
       if (ctx) {
         resumeContext();
+        syncMusic();
         return;
       }
       const activation = typeof navigator !== "undefined" ? navigator.userActivation : null;
@@ -150,6 +212,7 @@
     function unlock() {
       if (disposed) return;
       if (ensure()) resumeContext();
+      syncMusic();
     }
 
     /* ---------- Bloques de construcción ---------- */
@@ -209,7 +272,7 @@
       const k = crowd();
       let osc;
       if (kind === "paddle") osc = tone("triangle", 420 * r, 700 * r, 0.09, 0.38 * k);
-      else if (kind === "target") osc = tone("square", 760 * r, 520 * r, 0.05, 0.1 * k);
+      else if (kind === "target") osc = tone("square", 760 * r, 520 * r, 0.05, 0.22 * k);
       else osc = tone("triangle", 320 * r, 250 * r, 0.07, 0.3 * k);
 
       bounceVoices++;
@@ -242,7 +305,7 @@
       lastLaser = now;
 
       const r = 1 + (Math.random() - 0.5) * 0.08;
-      const osc = tone("sawtooth", 1500 * r, 280, 0.13, 0.3 * crowd());
+      const osc = tone("sawtooth", 1500 * r, 280, 0.13, 0.5 * crowd());
       bounceVoices++;
       osc.onended = () => {
         bounceVoices--;
@@ -259,6 +322,133 @@
       last.onended = () => {
         voices--;
       };
+    }
+
+    /* ---------- Música ---------- */
+
+    function decodeMusic(arrayBuffer) {
+      if (injected) return ctx.decodeAudioData(arrayBuffer);
+      const Offline = globalThis.OfflineAudioContext || globalThis.webkitOfflineAudioContext;
+      if (Offline) return new Offline(2, 1, MUSIC_RATE).decodeAudioData(arrayBuffer);
+      if (!ensure()) return Promise.reject(new Error("sin AudioContext"));
+      return ctx.decodeAudioData(arrayBuffer);
+    }
+
+    /** Carga y decodifica las dos pistas (una sola vez). No necesita AudioContext. */
+    function loadMusic() {
+      if (!musicOpts || loading) return loading;
+      loading = Promise.all(
+        Object.keys(MUSIC).map(async (kind) => {
+          try {
+            const raw = await loader(kind);
+            const decoded =
+              raw && typeof raw.getChannelData === "function" ? raw : await decodeMusic(raw);
+            if (!disposed) buffers[kind] = decoded;
+          } catch (error) {
+            musicError = error;
+          }
+        })
+      ).then(() => {
+        loaded = true;
+        syncMusic();
+      });
+      return loading;
+    }
+
+    function stopCurrent(fade) {
+      const track = current;
+      if (!track) return;
+      current = null;
+      try {
+        if (fade > 0 && ctx) {
+          const t = ctx.currentTime;
+          track.g.gain.cancelScheduledValues(t);
+          track.g.gain.setValueAtTime(track.g.gain.value, t);
+          track.g.gain.linearRampToValueAtTime(0.0001, t + fade);
+          track.src.stop(t + fade + 0.02);
+        } else {
+          track.src.stop();
+        }
+      } catch {
+        // La fuente ya había terminado.
+      }
+    }
+
+    function startTrack(kind, buffer) {
+      const cfg = MUSIC[kind];
+      const t = ctx.currentTime;
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.loop = cfg.loop;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(cfg.gain, t + cfg.fadeIn);
+      src.connect(g);
+      g.connect(master);
+
+      const track = { kind, src, g };
+      src.onended = () => {
+        try {
+          g.disconnect();
+        } catch {
+          // Ya desconectado.
+        }
+        if (current === track) {
+          current = null;
+          if (!cfg.loop) lastFinished = kind;
+        }
+      };
+      current = track;
+      src.start(t);
+    }
+
+    /** Hace que suene lo que se pidió, cuando se pueda (contexto en marcha y pista cargada). */
+    function syncMusic() {
+      if (!musicOpts || disposed || hiddenSuspended || !canPlay()) return;
+      if (!wanted) {
+        stopCurrent(0.25);
+        return;
+      }
+      if (current && current.kind === wanted) return;
+      if (lastFinished === wanted) return; // la marcha ya sonó entera
+      const buffer = buffers[wanted];
+      if (!buffer) return; // se reintenta al terminar la carga
+      stopCurrent(0.2);
+      startTrack(wanted, buffer);
+    }
+
+    function playMusic(kind) {
+      if (!musicOpts || disposed || !MUSIC[kind]) return;
+      wanted = kind;
+      lastFinished = null; // una petición explícita vuelve a reproducir
+      loadMusic();
+      syncMusic();
+    }
+
+    function stopMusic() {
+      wanted = null;
+      syncMusic();
+    }
+
+    /** La pestaña oculta pausa también el audio (el bucle del juego se detiene igualmente). */
+    function setHidden(hidden) {
+      if (disposed || injected || !ctx) return;
+      if (hidden && ctx.state === "running") {
+        hiddenSuspended = true;
+        ctx.suspend().catch(() => {});
+      } else if (!hidden && hiddenSuspended) {
+        hiddenSuspended = false;
+        ctx.resume().catch(() => {});
+      }
+    }
+
+    function musicState() {
+      if (disposed) return "off";
+      if (!musicOpts) return "disabled";
+      if (current) return "playing:" + current.kind;
+      if (!wanted) return "idle";
+      if (buffers[wanted]) return lastFinished === wanted ? "idle" : "waiting";
+      return loaded ? "error" : "loading";
     }
 
     /* ---------- Control ---------- */
@@ -289,6 +479,8 @@
 
     function dispose() {
       if (disposed) return;
+      stopCurrent(0);
+      for (const key of Object.keys(buffers)) delete buffers[key];
       disposed = true;
       const old = ctx;
       ctx = null;
@@ -305,15 +497,32 @@
       explosion,
       laser,
       pickup,
+      playMusic,
+      stopMusic,
+      setHidden,
+      musicState,
       setMuted,
       toggleMute,
       isMuted: () => muted,
       state,
       dispose,
       // Solo para pruebas.
-      debug: { get voices() { return voices; }, get context() { return ctx; } }
+      debug: {
+        get voices() { return voices; },
+        get context() { return ctx; },
+        get buffers() { return buffers; },
+        musicReady: () => loading || Promise.resolve(),
+        // Analizador conectado a la salida de la mezcla (música + efectos).
+        tap() {
+          if (!ctx || !master) return null;
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 2048;
+          master.connect(analyser);
+          return analyser;
+        }
+      }
     };
   }
 
-  WB.Audio = { create, CFG };
+  WB.Audio = { create, CFG, MUSIC };
 })();

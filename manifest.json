@@ -13,5 +13,15 @@
   ],
   "host_permissions": [
     "<all_urls>"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "music/*.mp3"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
   ]
 }
