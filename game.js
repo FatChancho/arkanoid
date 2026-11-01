@@ -32,6 +32,26 @@
  * tras un impacto esa pelota tiene un bloqueo de 3 subpasos en los que rebota
  * sin dañar, para que un mismo golpe no se lleve varios objetivos contiguos.
  *
+ * RATÓN CAPTURADO (POINTER LOCK)
+ * El primer clic captura el ratón con la API de bloqueo del puntero: el cursor
+ * se oculta y no puede salir de la ventana, y el juego recibe solo movimiento
+ * RELATIVO del que usa únicamente el eje horizontal (el vertical se ignora).
+ * Así la pala sigue respondiendo aunque muevas el ratón mucho más allá del
+ * borde de la ventana. `movementX` llega en píxeles CSS (también con DPR 2) y
+ * se divide por la escala del tablero para que la pala siga al ratón 1:1.
+ * Defensa contra saltos espurios: algunos navegadores/plataformas emiten un
+ * `movementX` enorme justo al conceder la captura (la pala saltaría al borde y
+ * se perdería la bola). Se ignora el movimiento durante `lockSettleMs` tras
+ * la captura y los eventos sueltos con |movementX| mayor que
+ * max(lockMinJump, 45 % del ancho de la ventana). Entre que se pide la captura
+ * y se concede (`lockPendingMs` como máximo) también se ignora el movimiento
+ * absoluto: algunos navegadores llevan el cursor a (0, 0) en ese intervalo y la
+ * pala saltaría al borde izquierdo.
+ * Si se pierde la captura (Esc, cambio de pestaña...), reaparece el cursor, la
+ * pala vuelve al control absoluto y un aviso pide un clic para recapturar.
+ * Esc con el ratón capturado solo lo libera; otra pulsación sale del juego.
+ * Sin soporte (iframe sin permiso, etc.) todo sigue con el control absoluto.
+ *
  * SAQUE
  * La bola espera pegada a la pala hasta que el jugador la lanza con un clic
  * (o con Espacio, o tocando la pantalla). Vale para el saque inicial y para el
@@ -80,6 +100,12 @@
     maxLives: 3,
     serveDelaySteps: 40,
     serveWaitsForClick: true,
+    pointerLock: true,
+    mouseSensitivity: 1,
+    lockEscGraceMs: 400,
+    lockSettleMs: 150,
+    lockPendingMs: 300,
+    lockMinJump: 300,
     revealBlur: 5,
     hitLockSubsteps: 3,
     maxSubstepDistance: 3.5,
@@ -280,6 +306,7 @@
       patterns: null,
       bannerInfo: null,
       reveal: { on: false, dirty: true, layer: null, sharp: null },
+      lock: { wasActive: false, everLocked: false, lostAt: -1e9, acquiredAt: -1e9, pendingUntil: 0, ignored: 0 },
       nextPowerup: cfg.powerupEvery,
       bag: [],
       spawned: 0,
@@ -321,8 +348,56 @@
       if (g.audio) g.audio.unlock();
     }
 
+    function lockActive() {
+      return Boolean(g.canvas) && document.pointerLockElement === g.canvas;
+    }
+
+    /** Cursor oculto solo si está capturado (si no, hay que poder verlo). */
     function setCursor() {
-      if (g.canvas) g.canvas.style.cursor = g.state === "playing" ? "none" : "default";
+      if (g.canvas) g.canvas.style.cursor = g.state === "playing" && lockActive() ? "none" : "default";
+    }
+
+    /** Debe llamarse desde un gesto del usuario (mousedown/click). */
+    function requestLock() {
+      if (!cfg.pointerLock || !g.canvas || lockActive()) return;
+      if (typeof g.canvas.requestPointerLock !== "function") return;
+      g.lock.pendingUntil = performance.now() + cfg.lockPendingMs;
+      try {
+        const result = g.canvas.requestPointerLock();
+        if (result && typeof result.catch === "function") {
+          result.catch(() => {
+            g.lock.pendingUntil = 0; // rechazada: vuelve el control absoluto
+          });
+        }
+      } catch {
+        g.lock.pendingUntil = 0;
+        // Sin permiso o sin soporte: se sigue con el control absoluto.
+      }
+    }
+
+    function releaseLock() {
+      try {
+        if (document.pointerLockElement && document.pointerLockElement === g.canvas) {
+          document.exitPointerLock();
+        }
+      } catch {
+        // Ya liberado.
+      }
+    }
+
+    function onLockChange() {
+      const active = lockActive();
+      g.lock.pendingUntil = 0;
+      if (active) {
+        g.lock.everLocked = true;
+        g.lock.acquiredAt = performance.now();
+        g.mouseX = g.paddleX; // sin saltos al capturar
+        g.inputMode = "mouse";
+      } else if (g.lock.wasActive) {
+        g.lock.lostAt = performance.now();
+      }
+      g.lock.wasActive = active;
+      setCursor();
     }
 
     /* ---------------- Canvas ---------------- */
@@ -721,6 +796,7 @@
       if (Math.abs(target - g.paddleW) < 0.3) g.paddleW = target;
 
       g.paddleX = clamp(g.paddleX, g.paddleW / 2, W - g.paddleW / 2);
+      if (lockActive()) g.mouseX = g.paddleX; // el "ratón lógico" nunca se sale de la pala: sin zona muerta
     }
 
     function normalizeBall(b) {
@@ -985,6 +1061,23 @@
       ctx.globalAlpha = 0.3 * pulse;
       ctx.drawImage(g.reveal.sharp, 0, 0, W, H); // tinte suave del interior (deja ver la página)
       ctx.restore();
+    }
+
+    /** Aviso cuando se pierde la captura del ratón a mitad de partida. */
+    function drawLockPrompt(ctx) {
+      if (!cfg.pointerLock || !g.lock.everLocked || lockActive() || g.state !== "playing") return;
+      if (waitingForLaunch() || (g.tick >> 4) % 2 === 1) return;
+      const text = "CLIC PARA CAPTURAR EL RATÓN";
+      const px = 2;
+      const tw = textWidth(text, px);
+      const x = clamp(W / 2 - tw / 2, 8, W - tw - 8);
+      const y = 22;
+      ctx.fillStyle = INK;
+      ctx.fillRect(x - 6, y - 5, tw + 12, 7 * px + 10);
+      ctx.fillStyle = "#35d9ff";
+      ctx.fillRect(x - 6, y - 5, tw + 12, 1);
+      ctx.fillRect(x - 6, y - 5 + 7 * px + 9, tw + 12, 1);
+      drawText(ctx, text, x, y, px, "#35d9ff");
     }
 
     /** Aviso sobre la bola mientras espera el lanzamiento. */
@@ -1393,6 +1486,7 @@
       drawBalls(ctx);
       drawToasts(ctx);
       drawLaunchPrompt(ctx);
+      drawLockPrompt(ctx);
       ctx.restore();
 
       drawFrame(ctx);
@@ -1404,7 +1498,28 @@
 
     function onMouseMove(event) {
       g.inputMode = "mouse";
-      g.mouseX = toStageX(event.clientX);
+      if (lockActive()) {
+        // Recién capturado, o salto imposible de una sola vez: se descarta.
+        const raw = event.movementX || 0;
+        if (
+          performance.now() - g.lock.acquiredAt < cfg.lockSettleMs ||
+          Math.abs(raw) > Math.max(cfg.lockMinJump, window.innerWidth * 0.45)
+        ) {
+          g.lock.ignored++;
+          return;
+        }
+        // Solo el eje horizontal; el vertical (movementY) se ignora a propósito.
+        const base = g.mouseX === null ? g.paddleX : g.mouseX;
+        const dx = (raw / g.view.scale) * cfg.mouseSensitivity;
+        g.mouseX = clamp(base + dx, g.paddleW / 2, W - g.paddleW / 2);
+      } else {
+        // Captura pedida y aún sin conceder: el cursor puede estar "en tránsito".
+        if (performance.now() < g.lock.pendingUntil) {
+          g.lock.ignored++;
+          return;
+        }
+        g.mouseX = toStageX(event.clientX);
+      }
     }
 
     function onKeyDown(event) {
@@ -1414,6 +1529,13 @@
       if (key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
+        // Primera pulsación: solo soltar el ratón (Chrome ya lo hace por su cuenta;
+        // si la tecla nos llega igualmente, no se interpreta como "salir").
+        if (lockActive()) {
+          releaseLock();
+          return;
+        }
+        if (performance.now() - g.lock.lostAt < cfg.lockEscGraceMs) return;
         exit();
         return;
       }
@@ -1458,7 +1580,10 @@
       if (event.target !== g.canvas) return;
       event.stopPropagation();
       if (event.type === "mousedown" || event.type === "pointerdown") unlockAudio();
-      if (event.type === "mousedown" && event.button === 0) launchBall();
+      if (event.type === "mousedown" && event.button === 0) {
+        requestLock();
+        launchBall();
+      }
     }
 
     function onClick(event) {
@@ -1469,8 +1594,9 @@
         restart();
         return;
       }
+      requestLock();
       launchBall();
-      if (toStageY(event.clientY) >= paddleY() - 50) {
+      if (!lockActive() && toStageY(event.clientY) >= paddleY() - 50) {
         g.mouseX = toStageX(event.clientX);
         g.inputMode = "mouse";
       }
@@ -1513,6 +1639,10 @@
       listen(window, "touchcancel", onTouchEnd, true);
       listen(window, "blur", onBlur);
       listen(document, "visibilitychange", onVisibility);
+      listen(document, "pointerlockchange", onLockChange);
+      listen(document, "pointerlockerror", () => {
+        g.lock.pendingUntil = 0;
+      });
     }
 
     /** Pestaña oculta: el bucle se detiene, y el audio también. */
@@ -1593,9 +1723,12 @@
       for (const remove of removers) remove();
       removers.length = 0;
 
+      releaseLock();
       if (g.canvas) g.canvas.remove();
       g.canvas = null;
       g.ctx = null;
+      g.lock.wasActive = false;
+      g.lock.everLocked = false;
 
       if (g.audio) g.audio.dispose();
       g.audio = null;
@@ -1668,6 +1801,10 @@
         addBolt(x, y) { g.bolts.push({ x, y }); },
         fire: fireLaser,
         get banner() { return g.bannerInfo; },
+        get locked() { return lockActive(); },
+        get tick() { return g.tick; },
+        get mouseX() { return g.mouseX; },
+        get lockInfo() { return g.lock; },
         get reveal() { return g.reveal.on; },
         get waiting() { return waitingForLaunch(); },
         launch: launchBall,

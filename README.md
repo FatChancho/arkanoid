@@ -11,13 +11,14 @@ Extensión de Chrome (Manifest V3) que convierte la página actual en un escenar
 - **Fragmentos** con la textura y los colores de la captura original, que se mueven y se desvanecen.
 - **Banner retro fuera del tablero**: puntos, vidas, objetivos destruidos y restantes, porcentaje de superficie destruida (sin contar dos veces las zonas solapadas) y efectos activos con su tiempo, en una franja superior con tipografía de píxeles. No tapa la página: el tablero se escala para caber debajo, dentro de un marco neón.
 - **Objetos que caen según la puntuación** (power-ups): bola triple, barra grande, láser automático y bola grande. Ver «Objetos» más abajo.
+- **Ratón capturado, solo lateral**: el primer clic captura el ratón; el cursor no puede salir de la ventana y solo cuenta el movimiento horizontal. Ver «Ratón capturado».
 - **Saque con clic**: la bola espera pegada a la pala (con un aviso «CLIC PARA LANZAR») y no se mueve hasta que haces clic. También con `Espacio` o tocando la pantalla.
 - **Revelar bloques (`B`)**: resalta en rojo, con halo desenfocado, lo que queda por destruir. Útil cuando quedan pocos.
 - **Aspecto arcade**: pala con contorno oscuro y extremos de color, bola y cápsulas con contorno (se ven sobre páginas claras y oscuras), avisos flotantes y destello al recoger un objeto.
 - **Música**: *Arcade Kid* de fondo mientras juegas (en bucle) y una marcha fúnebre de 8 bits en el Game Over. Ver «Música».
 - **Sonido sintetizado** (Web Audio, sin archivos de audio): un rebote distinto para pared, pala y objetivo, y una explosión por cada región que se rompe, más larga y grave cuanto más área rompe el impacto. Tecla `M` para silenciar.
 - Pelota a velocidad constante con paso de física fijo (independiente de los Hz del monitor), 3 vidas, Game Over, victoria y reinicio.
-- Controles: ratón o táctil; flechas / `A` `D`; **clic, `Espacio` o toque: lanzar la bola**; **`B`: revelar bloques**; `R` reinicia; `M` sonido; `Esc` sale; clic para reiniciar tras Game Over o victoria.
+- Controles: ratón o táctil; flechas / `A` `D`; **clic, `Espacio` o toque: lanzar la bola**; **`B`: revelar bloques**; `R` reinicia; `M` sonido; `Esc` suelta el ratón y, pulsada otra vez, sale; clic para reiniciar tras Game Over o victoria.
 - Compatible con `devicePixelRatio` y con el redimensionado de la ventana.
 
 ## Instalación y uso
@@ -66,9 +67,19 @@ Errores contemplados: página no permitida, fallo de captura, fallo de inyecció
 7. **Duplicados**: dos piezas con IoU ≥ 0,8 son la misma; se conserva la de tipo más específico. Máximo 250 objetivos.
 8. **Logos**: por nombre (id, clase, `alt`, `title`, `aria-label`, `<title>` del SVG, ruta de la imagen), por coincidir su nombre accesible con el título o el dominio del sitio, o por ser un medio dentro de un enlace a la portada en la parte alta de la página.
 
+## Ratón capturado
+
+El primer clic de la partida lanza la bola y **captura el ratón** (API de bloqueo del puntero): el cursor se oculta y no puede salir de la ventana, así que la pala sigue respondiendo aunque muevas el ratón mucho más allá del borde. Mientras está capturado solo se usa el movimiento **horizontal**; el vertical se ignora. La pala sigue al ratón 1:1 (con la escala del tablero y también en pantallas de alta densidad). Chrome muestra su propio aviso («pulsa Esc para mostrar el cursor»).
+
+- **Esc**: la primera pulsación solo **libera el ratón**; otra pulsación sale del juego. Tras soltarlo, el cursor reaparece, la pala vuelve al control absoluto (sigue la posición del cursor) y un aviso parpadeante pide *«CLIC PARA CAPTURAR EL RATÓN»*. El clic recaptura sin lanzar otra bola.
+- Si cambias de pestaña o de ventana, el navegador también libera el ratón; al volver, el mismo aviso.
+- **Sin captura posible** (página en un iframe sin permiso, navegador sin soporte...): todo funciona como antes, con el cursor visible y control absoluto.
+- Las flechas / `A` `D` siguen funcionando capturado, y el ratón retoma desde donde dejó la pala (sin saltos).
+- **Defensas**: algunos navegadores emiten un movimiento enorme espurio al conceder la captura (la pala saltaría al borde y se perdería la bola). Por eso se ignora el movimiento durante los primeros 150 ms tras la captura, el movimiento absoluto mientras la captura está pendiente (máx. 300 ms), y cualquier evento suelto de más de max(300 px, 45 % del ancho de la ventana). Las tres cosas se pueden ajustar en `CONFIG` (`lockSettleMs`, `lockPendingMs`, `lockMinJump`), igual que la sensibilidad (`mouseSensitivity`, por defecto 1) o desactivar la captura (`pointerLock: false`).
+
 ## Saque y revelado de bloques
 
-**Saque.** Al empezar la partida, y también tras perder una vida, la bola espera sobre la pala y acompaña a la pala mientras la mueves. Se lanza con un clic izquierdo, con `Espacio` o tocando la pantalla; después, más clics no hacen nada. En Game Over, el clic reinicia la partida y la bola nueva también espera (ese mismo clic no la lanza). Para volver al saque automático a los 40 pasos, pon `serveWaitsForClick: false` en `CONFIG` de `game.js`.
+**Saque.** Al empezar la partida, y también tras perder una vida, la bola espera sobre la pala y acompaña a la pala mientras la mueves. Se lanza con un clic izquierdo, con `Espacio` o tocando la pantalla; después, más clics no hacen nada. El mismo clic captura el ratón (ver arriba). En Game Over, el clic reinicia la partida y la bola nueva también espera (ese mismo clic no la lanza). Para volver al saque automático a los 40 pasos, pon `serveWaitsForClick: false` en `CONFIG` de `game.js`.
 
 **Revelar (`B`).** Es un interruptor: `B` lo activa y otra pulsación lo apaga (mantener la tecla no parpadea). Resalta exactamente las regiones vivas, las mismas que usa la colisión: un halo rojo desenfocado por fuera del borde y un tinte suave por dentro, que deja ver la página. Lo que ya está destruido no se resalta, y se actualiza al instante tras cada impacto. El banner indica `B: VER BLOQUES` / `B: BLOQUES ON`. La capa se cachea a media resolución y solo se reconstruye cuando se destruye algo (≈1 ms por fotograma; unos 30 ms al reconstruirla en 1920×1080 con 500 regiones).
 
