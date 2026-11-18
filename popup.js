@@ -1,10 +1,13 @@
 
-const toggleBtn = document.getElementById("toggleBtn");
+const webBtn = document.getElementById("webBtn");
+const arcadeBtn = document.getElementById("arcadeBtn");
+const deactivateBtn = document.getElementById("deactivateBtn");
+const startRow = document.getElementById("startRow");
 const statusEl = document.getElementById("status");
 
 // El orden importa: los módulos se registran en __WebBreakout y content.js,
 // que va el último, los usa.
-const CONTENT_FILES = ["scene.js", "destruction.js", "audio.js", "game.js", "content.js"];
+const CONTENT_FILES = ["scene.js", "destruction.js", "audio.js", "arcade.js", "game.js", "content.js"];
 
 let isActive = false;
 let busy = false;
@@ -88,12 +91,12 @@ async function refreshStatus() {
 }
 
 function updateUI() {
-  toggleBtn.textContent = isActive
-    ? "Desactivar WebBreakout"
-    : "Activar WebBreakout";
+  const showing = isActive;
+  startRow.style.display = showing ? "none" : "flex";
+  deactivateBtn.style.display = showing ? "block" : "none";
 
   if (!isActive) {
-    statusEl.textContent = "Desactivado";
+    statusEl.textContent = "Elige un modo para jugar.";
     return;
   }
 
@@ -103,60 +106,77 @@ function updateUI() {
       : "Juego activado";
 }
 
-toggleBtn.addEventListener("click", async () => {
+async function activate(mode) {
   if (busy) return;
-
   busy = true;
-  toggleBtn.disabled = true;
-  statusEl.textContent = isActive
-    ? "Desactivando..."
-    : "Capturando la página...";
+  setBusy(true);
+  statusEl.textContent = mode === "arcade" ? "Iniciando modo arcade..." : "Capturando la página...";
 
   try {
     const tab = await getActiveTab();
 
-    if (isActive) {
-      const result = await sendGameMessage(tab.id, {
-        action: "deactivate"
-      });
-
-      if (result.ok === false) {
-        throw new Error(
-          result.error || "No se ha podido desactivar el juego."
-        );
-      }
-
-      isActive = false;
-      lastStatus = null;
-    } else {
-      // La captura se hace desde el popup, no desde content.js.
-      const screenshot = await captureTab(tab.windowId);
-
+    let screenshot = null;
+    if (mode !== "arcade") {
+      screenshot = await captureTab(tab.windowId);
       statusEl.textContent = "Preparando objetivos visuales...";
-
-      const result = await sendGameMessage(tab.id, {
-        action: "activate",
-        screenshot
-      });
-
-      if (!result.ok) {
-        throw new Error(
-          result.error || "No se ha podido activar WebBreakout."
-        );
-      }
-
-      isActive = true;
-      lastStatus = null;
     }
 
+    const result = await sendGameMessage(tab.id, {
+      action: "activate",
+      screenshot,
+      mode
+    });
+
+    if (!result.ok) {
+      throw new Error(result.error || "No se ha podido activar WebBreakout.");
+    }
+
+    isActive = true;
+    lastStatus = null;
     updateUI();
   } catch (error) {
     console.error("Error en WebBreakout:", error);
     statusEl.textContent = error.message || "Se ha producido un error.";
   } finally {
     busy = false;
-    toggleBtn.disabled = false;
+    setBusy(false);
   }
-});
+}
+
+async function deactivate() {
+  if (busy) return;
+  busy = true;
+  setBusy(true);
+  statusEl.textContent = "Desactivando...";
+
+  try {
+    const tab = await getActiveTab();
+    const result = await sendGameMessage(tab.id, { action: "deactivate" });
+
+    if (result.ok === false) {
+      throw new Error(result.error || "No se ha podido desactivar el juego.");
+    }
+
+    isActive = false;
+    lastStatus = null;
+    updateUI();
+  } catch (error) {
+    console.error("Error en WebBreakout:", error);
+    statusEl.textContent = error.message || "Se ha producido un error.";
+  } finally {
+    busy = false;
+    setBusy(false);
+  }
+}
+
+function setBusy(on) {
+  webBtn.disabled = on;
+  arcadeBtn.disabled = on;
+  deactivateBtn.disabled = on;
+}
+
+webBtn.addEventListener("click", () => activate("web"));
+arcadeBtn.addEventListener("click", () => activate("arcade"));
+deactivateBtn.addEventListener("click", deactivate);
 
 refreshStatus();

@@ -11,6 +11,8 @@ Extensión de Chrome (Manifest V3) que convierte la página actual en un escenar
 - **Fragmentos** con la textura y los colores de la captura original, que se mueven y se desvanecen.
 - **Banner retro fuera del tablero**: puntos, vidas, objetivos destruidos y restantes, porcentaje de superficie destruida (sin contar dos veces las zonas solapadas) y efectos activos con su tiempo, en una franja superior con tipografía de píxeles. No tapa la página: el tablero se escala para caber debajo, dentro de un marco neón.
 - **Objetos que caen según la puntuación** (power-ups): bola triple, barra grande, láser automático y bola grande. Ver «Objetos» más abajo.
+- **Modo arcade**: al destruir toda la web empieza un Arkanoid de niveles de ladrillos de colores (plateados de 2 golpes, dorados indestructibles), con la bola cada vez más rápida. Ver «Modo arcade».
+- **Pausa automática**: si el ratón no está capturado y el cursor sale de la ventana (p. ej. a otro monitor), la partida se pausa. Ver «Pausa automática».
 - **Ratón capturado, solo lateral**: el primer clic captura el ratón; el cursor no puede salir de la ventana y solo cuenta el movimiento horizontal. Ver «Ratón capturado».
 - **Saque con clic**: la bola espera pegada a la pala (con un aviso «CLIC PARA LANZAR») y no se mueve hasta que haces clic. También con `Espacio` o tocando la pantalla.
 - **Revelar bloques (`B`)**: resalta en rojo, con halo desenfocado, lo que queda por destruir. Útil cuando quedan pocos.
@@ -18,7 +20,7 @@ Extensión de Chrome (Manifest V3) que convierte la página actual en un escenar
 - **Música**: *Arcade Kid* de fondo mientras juegas (en bucle) y una marcha fúnebre de 8 bits en el Game Over. Ver «Música».
 - **Sonido sintetizado** (Web Audio, sin archivos de audio): un rebote distinto para pared, pala y objetivo, y una explosión por cada región que se rompe, más larga y grave cuanto más área rompe el impacto. Tecla `M` para silenciar.
 - Pelota a velocidad constante con paso de física fijo (independiente de los Hz del monitor), 3 vidas, Game Over, victoria y reinicio.
-- Controles: ratón o táctil; flechas / `A` `D`; **clic, `Espacio` o toque: lanzar la bola**; **`B`: revelar bloques**; `R` reinicia; `M` sonido; `Esc` suelta el ratón y, pulsada otra vez, sale; clic para reiniciar tras Game Over o victoria.
+- Controles: ratón o táctil; flechas / `A` `D`; **clic, `Espacio` o toque: lanzar la bola**; **`B`: revelar bloques**; `R` reinicia (desde la web); `M` sonido; `Esc` suelta el ratón y, pulsada otra vez, sale; clic para reiniciar tras Game Over; clic o `Espacio` para salir de una pausa.
 - Compatible con `devicePixelRatio` y con el redimensionado de la ventana.
 
 ## Instalación y uso
@@ -39,11 +41,12 @@ Extensión de Chrome (Manifest V3) que convierte la página actual en un escenar
 ├── scene.js          Detección y agrupación de objetivos (solo lectura del DOM)
 ├── destruction.js    Máscaras, regiones, colisión, capa del escenario y muestreo de colores
 ├── audio.js          Efectos de sonido sintetizados y reproductor de música
+├── arcade.js         Modo arcade: niveles de ladrillos (generador, dibujo y alcanzabilidad)
 ├── music/            arcade-kid.mp3 y marcha-funebre.mp3 (se cargan desde la extensión)
 └── game.js           Pelota, pala, vidas, entrada, efectos, HUD y ciclo de vida
 ```
 
-`popup.js` inyecta los cinco scripts en este orden: `scene.js`, `destruction.js`, `audio.js`, `game.js`, `content.js`. Comparten un espacio de nombres (`__WebBreakout`) en el mundo aislado del content script. La captura se pide siempre desde el popup; `content.js` nunca llama a `chrome.tabs`.
+`popup.js` inyecta los seis scripts en este orden: `scene.js`, `destruction.js`, `audio.js`, `arcade.js`, `game.js`, `content.js`. Comparten un espacio de nombres (`__WebBreakout`) en el mundo aislado del content script. La captura se pide siempre desde el popup; `content.js` nunca llama a `chrome.tabs`.
 
 ### Protocolo de mensajes (popup → content)
 
@@ -66,6 +69,30 @@ Errores contemplados: página no permitida, fallo de captura, fallo de inyecció
 6. **Se ignoran**: `display:none`, `opacity` ≈ 0, `visibility:hidden`, fuera del viewport o recortados por `overflow`, tapados por otro elemento (`elementFromPoint`) y más pequeños de 18×12 px.
 7. **Duplicados**: dos piezas con IoU ≥ 0,8 son la misma; se conserva la de tipo más específico. Máximo 250 objetivos.
 8. **Logos**: por nombre (id, clase, `alt`, `title`, `aria-label`, `<title>` del SVG, ruta de la imagen), por coincidir su nombre accesible con el título o el dominio del sitio, o por ser un medio dentro de un enlace a la portada en la parte alta de la página.
+
+## Modo arcade
+
+Cuando destruyes **toda la web**, en vez de terminar la partida aparece «¡WEB DESTRUIDA! · MODO ARCADE» (2,5 s) y empieza el **nivel 1**. La puntuación y las vidas continúan. Cada nivel es un escenario nuevo generado por `arcade.js` que pasa por la misma tubería que la captura de una web, así que todo lo demás funciona igual: fragmentos con el color real de cada ladrillo, objetos, láser, sonido, revelado con `B`, ratón capturado y pausa.
+
+- **Ladrillos**: blanco 50 · naranja 60 · cian 70 · verde 80 · rojo 90 · azul 100 · magenta 110 · amarillo 120 puntos (1 golpe). **Plateado**: 2 golpes (se agrieta tras el primero), da 50 × nivel puntos (mín. 100). **Dorado**: indestructible; la bola rebota y los disparos se consumen, y no cuenta para pasar de nivel.
+- **Niveles**: 9 diseños a mano (filas, pirámide, ajedrez, diamante, invasor, escalera, muros, corazón, marco) y, desde el 10, niveles procedurales simétricos con semilla fija (el mismo nivel sale siempre igual) con más plateados y dorados según sube. Hay niveles infinitos. Todos pasan una comprobación de alcanzabilidad: ningún grupo de ladrillos destruibles puede quedar encerrado por dorados.
+- **Pasar de nivel**: al romper el último ladrillo destruible, «NIVEL n SUPERADO» y **+500 puntos**; el siguiente empieza con la bola esperando el lanzamiento y se pierden los efectos y los objetos en caída (las vidas se conservan).
+- **Dificultad**: la bola gana un 5 % de velocidad por nivel (tope ×1,6, desde el nivel 13).
+- **Objetos**: en el arcade caen de ladrillos **al azar** (7 %, `arcadeDropChance`), no por puntuación como en la web.
+- **Game Over**: se muestra el nivel alcanzado y, al reiniciar (clic o `R`), se **vuelve a empezar desde la web**.
+- `arcade: false` en `CONFIG` recupera el final clásico (pantalla «¡HAS DESTRUIDO LA PÁGINA!» sin arcade). El nivel se adapta al tamaño de la ventana (13 columnas, en el 58 % superior); `clearSteps`, `levelBonus`, `speedPerLevel` y `maxSpeedFactor` ajustan la transición, la bonificación y la dificultad.
+
+## Pausa automática
+
+Si el ratón **no** está capturado, el cursor es visible y puede salir de la ventana —por ejemplo hacia otro monitor—, momento en que la pala deja de recibir movimiento y se perdería la bola. Para evitarlo, la partida se **pausa** (con una pantalla «PAUSA») cuando: se pierde la captura del ratón (Esc, otra ventana…), el cursor sale de la ventana, la ventana pierde el foco o la pestaña se oculta. Un clic —que además recaptura el ratón— o `Espacio` la reanudan; volver el cursor no la reanuda sola, para que el ratón vuelva a quedar capturado.
+
+- Solo si la bola está en juego y el último control usado fue el ratón: con la bola esperando, jugando con flechas o en Game Over no se pausa.
+- En pausa no avanza nada: ni la física ni los temporizadores de los objetos.
+- Si el ratón está libre y la bola en juego sin pausa (`autoPause: false`, o jugando con flechas), el banner muestra «RATÓN LIBRE» y aparece el aviso «CLIC PARA CAPTURAR EL RATÓN».
+- Lanzar o reiniciar con **`Espacio`/`R`** también pide la captura del ratón (antes solo lo hacía el clic).
+- Si el navegador no puede capturar el ratón, no se muestran esos avisos, pero la pausa al salir el cursor sigue protegiendo.
+- **Limitación del navegador**: Chrome rechaza las peticiones de captura repetidas en poco tiempo («Too many pointer lock requests»). A un jugador normal no le afecta (se captura una vez), pero si alterna muy rápido verá «RATÓN LIBRE» hasta que pase un momento y haga clic.
+- `autoPause: false` lo desactiva.
 
 ## Ratón capturado
 
@@ -134,6 +161,7 @@ Chrome no deja sonar a una página hasta que el usuario interactúa con ella (un
 - **Resolución de máscara** de 1 a 4 px CSS (2 px en un portátil típico); el borrado se redondea a píxeles de la captura, con hasta 1 px de desviación en los bordes.
 - **Línea de la pala.** Lo que queda por debajo de la pala (por ejemplo el pie de página de Google) es inalcanzable: no cuenta como destruible y permanece intacto.
 - **La bola en espera puede nacer dentro de un objetivo**: si la página tiene un elemento pegado al borde inferior (por ejemplo, el pie de Google), la bola, que espera sobre la pala, queda dentro de él. Al lanzarla destruye esa región al instante y puede rebotar hacia abajo. Es la misma geometría de siempre; ahora se nota porque la bola espera a la vista.
+- **Arcade**: un ladrillo dorado impide el paso del disparo y de la bola, y un nivel con muchos puede tardar en limpiarse (el bot de pruebas limpió los niveles 1, 2, 6, 7 y 9 sin atascos, pero no todos los generados). Al reiniciar tras un Game Over se pierde el progreso del arcade.
 - **Los objetos solo caen de impactos** (de bola o de proyectil), nunca de otras fuentes, y el ritmo depende de la puntuación: en una página con pocos objetivos caerán pocos.
 - **Orden de pintado aproximado**: las capas son por tipo (fondo < imagen < tarjeta < logo/control < texto), no el `z-index` real.
 - **No se recorre Shadow DOM**, ni pseudo-elementos (`::before/::after`) ni fuentes de iconos. El contenido de `iframe` se trata como una sola pieza.

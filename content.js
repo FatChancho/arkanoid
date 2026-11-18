@@ -1,8 +1,8 @@
 /*
  * content.js — Orquestador del content script.
  *
- * Se inyecta desde popup.js junto con scene.js, destruction.js, audio.js y
- * game.js (en ese orden; comparten el mismo mundo aislado). Aquí solo hay:
+ * Se inyecta desde popup.js junto con scene.js, destruction.js, audio.js,
+ * arcade.js y game.js (en ese orden; comparten el mismo mundo aislado). Aquí solo hay:
  *   - el protocolo de mensajes con el popup,
  *   - la secuencia de arranque (captura -> objetivos -> motor -> juego),
  *   - la limpieza completa al desactivar.
@@ -13,7 +13,7 @@
  *
  * Mensajes (popup -> content), todos responden { ok, ... }:
  *   getStatus   -> { ok, active, state, score, lives, destroyedTargets, ... }
- *   activate    { screenshot: dataURL } -> { ok, active } | { ok:false, error }
+ *   activate    { screenshot?: dataURL, mode: "web"|"arcade" } -> { ok, active } | { ok:false, error }
  *   deactivate  -> { ok, active:false }
  *   restart     -> { ok, active }
  */
@@ -39,73 +39,124 @@
     return Boolean(WB && WB.Scene && WB.Destruction && WB.Game);
   }
 
-  async function startGame(screenshot) {
+  /** Inicia el juego en modo web (screenshot obligatorio). */
+  async function startWebGame(screenshot) {
+    if (typeof screenshot !== "string" || !screenshot.startsWith("data:image/")) {
+      throw new Error("No se ha recibido una captura válida de la página.");
+    }
+
+    const image = await loadImage(screenshot);
+    const stage = { width: window.innerWidth, height: window.innerHeight };
+
+    // La captura y el viewport deben tener la misma proporción; si no, la
+    // ventana cambió entre la captura y la activación.
+    const imageRatio = image.naturalWidth / image.naturalHeight;
+    const viewRatio = stage.width / stage.height;
+    if (!(Math.abs(imageRatio / viewRatio - 1) <= 0.05)) {
+      throw new Error("La captura no coincide con el tamaño actual de la ventana. Inténtalo de nuevo.");
+    }
+
+    // 1. Objetivos (antes de crear el canvas, para que no estorbe).
+    const detected = WB.Scene.detectTargets();
+    if (!detected.targets.length) {
+      throw new Error("No se han encontrado objetivos visuales en esta página.");
+    }
+
+    // 2. Motor de destrucción y capa del escenario.
+    const sampler = WB.Destruction.createSampler({
+      image,
+      stageWidth: stage.width,
+      stageHeight: stage.height
+    });
+    const engine = WB.Destruction.createEngine({
+      width: stage.width,
+      height: stage.height,
+      targets: detected.targets,
+      sampler,
+      playAreaBottom: WB.Game.playAreaBottom(stage.height)
+    });
+    if (!engine.targets.length) {
+      throw new Error("No hay superficie destruible suficiente en esta página.");
+    }
+    const sceneLayer = WB.Destruction.createSceneLayer({
+      image,
+      stageWidth: stage.width,
+      stageHeight: stage.height
+    });
+
+    // 3. Juego en modo web (transición a arcade al destruirla).
+    const game = WB.Game.create({
+      engine,
+      sceneLayer,
+      image,
+      stage,
+      startMode: "web",
+      onExit: stopGame,
+      onError: stopGame
+    });
+
+    session = { game, engine, sceneLayer, detected };
+    game.start();
+  }
+
+  /** Inicia el juego directamente en modo arcade (sin captura ni objetivos web). */
+  function startArcadeGame() {
+    const stage = { width: window.innerWidth, height: window.innerHeight };
+
+    // Motor sin objetivos web (la pelota no tiene nada que destruir en la web;
+    // el modo arcade construye sus propios mundos con arcade.js).
+    const engine = WB.Destruction.createEngine({
+      width: stage.width,
+      height: stage.height,
+      targets: [],
+      sampler: null,
+      playAreaBottom: WB.Game.playAreaBottom(stage.height)
+    });
+
+    // Capa de escena vacía: sin imagen, solo pinta negro (el modo arcade
+    // usa su propio canvas de ladrillos y no necesita la captura de la web).
+    const noop = () => {};
+    const sceneLayer = {
+      canvas: null,
+      reset: noop,
+      erase: noop,
+      draw: noop,
+      dispose: noop,
+      width: stage.width,
+      height: stage.height,
+      scaleX: 1,
+      scaleY: 1
+    };
+
+    const game = WB.Game.create({
+      engine,
+      sceneLayer,
+      image: null,
+      stage,
+      startMode: "arcade",
+      onExit: stopGame,
+      onError: stopGame
+    });
+
+    session = { game, engine, sceneLayer, detected: null };
+    game.start();
+  }
+
+  async function startGame(screenshot, mode) {
     if (session) return;
     if (starting) throw new Error("WebBreakout ya se está activando.");
     if (!modulesReady()) {
       throw new Error("No se han cargado los módulos de WebBreakout. Recarga la página.");
     }
-    if (typeof screenshot !== "string" || !screenshot.startsWith("data:image/")) {
-      throw new Error("No se ha recibido una captura válida de la página.");
-    }
 
     starting = true;
-    let sceneLayer = null;
-
     try {
-      const image = await loadImage(screenshot);
-      const stage = { width: window.innerWidth, height: window.innerHeight };
-
-      // La captura y el viewport deben tener la misma proporción; si no, la
-      // ventana cambió entre la captura y la activación.
-      const imageRatio = image.naturalWidth / image.naturalHeight;
-      const viewRatio = stage.width / stage.height;
-      if (!(Math.abs(imageRatio / viewRatio - 1) <= 0.05)) {
-        throw new Error("La captura no coincide con el tamaño actual de la ventana. Inténtalo de nuevo.");
+      if (mode === "arcade") {
+        startArcadeGame();
+      } else {
+        await startWebGame(screenshot);
       }
-
-      // 1. Objetivos (antes de crear el canvas, para que no estorbe).
-      const detected = WB.Scene.detectTargets();
-      if (!detected.targets.length) {
-        throw new Error("No se han encontrado objetivos visuales en esta página.");
-      }
-
-      // 2. Motor de destrucción y capa del escenario.
-      const sampler = WB.Destruction.createSampler({
-        image,
-        stageWidth: stage.width,
-        stageHeight: stage.height
-      });
-      const engine = WB.Destruction.createEngine({
-        width: stage.width,
-        height: stage.height,
-        targets: detected.targets,
-        sampler,
-        playAreaBottom: WB.Game.playAreaBottom(stage.height)
-      });
-      if (!engine.targets.length) {
-        throw new Error("No hay superficie destruible suficiente en esta página.");
-      }
-      sceneLayer = WB.Destruction.createSceneLayer({
-        image,
-        stageWidth: stage.width,
-        stageHeight: stage.height
-      });
-
-      // 3. Juego.
-      const game = WB.Game.create({
-        engine,
-        sceneLayer,
-        image,
-        stage,
-        onExit: stopGame,
-        onError: stopGame
-      });
-
-      session = { game, engine, sceneLayer, detected };
-      game.start();
     } catch (error) {
-      if (sceneLayer) sceneLayer.dispose();
       session = null;
       throw error;
     } finally {
@@ -134,7 +185,9 @@
       remainingTargets: s.remainingTargets,
       totalTargets: s.totalTargets,
       percentDestroyed: s.percentDestroyed,
-      music: s.music
+      music: s.music,
+      mode: s.mode,
+      level: s.level
     };
   }
 
@@ -142,7 +195,7 @@
     if (!message || typeof message.action !== "string") return;
 
     if (message.action === "activate") {
-      startGame(message.screenshot)
+      startGame(message.screenshot, message.mode || "web")
         .then(() => sendResponse({ ok: true, active: true }))
         .catch((error) =>
           sendResponse({
@@ -189,3 +242,4 @@
     getGame: () => (session ? session.game : null)
   };
 })();
+

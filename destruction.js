@@ -28,6 +28,14 @@
  * determinista). Cada impacto destruye UNA región; la resistencia del objetivo
  * es N.
  *
+ * LADRILLOS (MODO ARCADE)
+ * Un objetivo de entrada puede llevar `hp` (golpes que aguanta; 1 por defecto)
+ * y `solid` (indestructible):
+ *   - hp > 1: la región no se parte; cada golpe devuelve `damaged: true` y
+ *     solo el último la destruye.
+ *   - solid: colisiona como cualquier otro, pero `hit()` devuelve null y no
+ *     cuenta en las estadísticas (ni en el total, ni en el porcentaje).
+ *
  * SILUETAS
  * Para logos, SVG y canvas, y PNG/SVG/WebP pequeños, la forma se afina con la
  * captura: se marcan las celdas cuyo color difiere del fondo (estimado en el
@@ -579,6 +587,7 @@
 
     const targets = [];
     let totalCells = 0;
+    let destructible = 0;
 
     for (let i = 0; i < input.length; i++) {
       const cells = cellLists[i];
@@ -586,8 +595,10 @@
       const t = input[i];
       const area = cells.length * cellArea;
 
+      const solid = Boolean(t.solid);
+      const hp = Math.max(1, Math.floor(t.hp) || 1);
       const n =
-        area <= opts.smallArea
+        solid || hp > 1 || area <= opts.smallArea
           ? 1
           : clamp(Math.round(Math.sqrt(area / opts.areaPerChunk)), 2, opts.maxChunks);
 
@@ -611,7 +622,10 @@
       if (!chunks.length) continue;
 
       const bounds = boundsOfRects(chunks.map((c) => c.bounds));
-      totalCells += cells.length;
+      if (!solid) {
+        totalCells += cells.length;
+        destructible++;
+      }
       targets.push({
         id: t.id,
         key: t.key,
@@ -623,10 +637,15 @@
         area,
         chunks,
         bounds,
-        resistance: chunks.length,
+        resistance: solid ? Infinity : hp > 1 ? hp : chunks.length,
         aliveChunks: chunks.length,
         destroyed: false,
-        destroyedArea: 0
+        destroyedArea: 0,
+        solid,
+        hp,
+        maxHp: hp,
+        points: t.points || 0,
+        color: t.color || null
       });
     }
 
@@ -637,9 +656,9 @@
     function stats() {
       const percent = totalCells ? Math.min(100, (destroyedCells / totalCells) * 100) : 0;
       return {
-        totalTargets: targets.length,
+        totalTargets: destructible,
         destroyedTargets,
-        remainingTargets: targets.length - destroyedTargets,
+        remainingTargets: destructible - destroyedTargets,
         totalArea: totalCells * cellArea,
         destroyedArea: destroyedCells * cellArea,
         percentDestroyed: percent
@@ -721,12 +740,10 @@
       };
     }
 
-    function makeFragments(chunk, impact) {
-      const count = clamp(
-        Math.round(chunk.area / opts.fragmentAreaDivisor),
-        opts.minFragments,
-        opts.maxFragments
-      );
+    function makeFragments(chunk, impact, forcedCount) {
+      const count =
+        forcedCount ||
+        clamp(Math.round(chunk.area / opts.fragmentAreaDivisor), opts.minFragments, opts.maxFragments);
       const rects = chunk.rects;
       const weights = rects.map((r) => r.w * r.h);
       const totalW = weights.reduce((a, b) => a + b, 0);
@@ -771,7 +788,22 @@
       if (!contact) return null;
       const t = contact.target;
       const ch = contact.chunk;
-      if (t.destroyed || !ch.alive) return null;
+      if (t.solid || t.destroyed || !ch.alive) return null;
+
+      // Ladrillo de varios golpes: aguanta, suelta unas chispas y se queda.
+      if (t.hp > 1) {
+        t.hp--;
+        return {
+          target: t,
+          chunk: ch,
+          targetDestroyed: false,
+          damaged: true,
+          hpLeft: t.hp,
+          rects: [],
+          area: 0,
+          fragments: makeFragments(ch, impact, 5)
+        };
+      }
 
       ch.alive = false;
       for (let k = 0; k < ch.cells.length; k++) owner[ch.cells[k]] = 0;
@@ -801,6 +833,7 @@
         t.destroyed = false;
         t.aliveChunks = t.chunks.length;
         t.destroyedArea = 0;
+        t.hp = t.maxHp;
         for (const ch of t.chunks) ch.alive = true;
       }
     }

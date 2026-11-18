@@ -52,6 +52,27 @@
  * Esc con el ratón capturado solo lo libera; otra pulsación sale del juego.
  * Sin soporte (iframe sin permiso, etc.) todo sigue con el control absoluto.
  *
+ * MODO ARCADE
+ * Al destruir toda la web (en vez de terminar) empieza el modo arcade: niveles
+ * de ladrillos generados por arcade.js. Cada nivel es un "mundo" nuevo (lienzo
+ * + motor de destrucción + capa de escena) que sustituye al de la web; la
+ * puntuación y las vidas continúan. Estado "clear": 2,5 s de pantalla de
+ * transición (web destruida / nivel superado), sin física. Cada nivel sube la
+ * velocidad de la bola un 5 % (tope x1,6). Los ladrillos dan sus propios
+ * puntos (plateado: 2 golpes; dorado: indestructible) y los objetos caen de
+ * ladrillos al azar (`arcadeDropChance`), no por puntuación. Tras un Game Over
+ * se vuelve a empezar desde la web. `arcade: false` recupera el final clásico.
+ *
+ * PAUSA AUTOMÁTICA
+ * Si el ratón NO está capturado (la captura falló o se perdió), el cursor es
+ * visible y puede salir de la ventana —por ejemplo, a otro monitor—, momento en
+ * que la pala deja de recibir movimiento. Para no costar la bola, la partida
+ * se pausa cuando: se pierde la captura (Esc, otra ventana...), el cursor sale
+ * de la ventana, la ventana pierde el foco o la pestaña se oculta. Solo si la
+ * bola está en juego y el último control usado fue el ratón (con flechas no
+ * se pausa por mover el ratón). Se sale con un clic, que además recaptura el
+ * ratón, o con Espacio. `autoPause: false` lo desactiva.
+ *
  * SAQUE
  * La bola espera pegada a la pala hasta que el jugador la lanza con un clic
  * (o con Espacio, o tocando la pantalla). Vale para el saque inicial y para el
@@ -96,11 +117,20 @@
     paddleBottom: 28,
     paddleSpeed: 7,
     ballRadius: 7,
-    ballSpeed: 10,
+    ballSpeed: 12,
     maxLives: 3,
     serveDelaySteps: 40,
     serveWaitsForClick: true,
     pointerLock: true,
+    autoPause: true,
+
+    // Modo arcade
+    arcade: true,
+    clearSteps: 150,
+    levelBonus: 500,
+    arcadeDropChance: 0.07,
+    speedPerLevel: 0.05,
+    maxSpeedFactor: 1.6,
     mouseSensitivity: 1,
     lockEscGraceMs: 400,
     lockSettleMs: 150,
@@ -130,7 +160,7 @@
     wideSteps: 1200,
     laserSteps: 900,
     maxBalls: 9,
-    bigBallRadius: 13,
+    bigBallRadius: 20,
     bigBallSteps: 1200,
     ballEase: 0.25,
     splitAngle: 0.38,
@@ -277,13 +307,24 @@
    */
   function create(options) {
     const cfg = Object.assign({}, CONFIG, options.config || {});
-    const { engine, sceneLayer, image } = options;
+    // Mundo actual: la captura de la web o, en el modo arcade, el nivel en curso.
+    let engine = options.engine;
+    let sceneLayer = options.sceneLayer;
+    let image = options.image;
+    const web = { engine, sceneLayer, image };
     const W = options.stage.width;
     const H = options.stage.height;
 
     const g = {
       active: false,
-      state: "playing", // playing | gameover | won
+      state: "playing", // playing | clear | gameover | won
+      mode: "web", // web | arcade
+      level: 0,
+      speed: cfg.ballSpeed,
+      arcadeWorld: null,
+      clearUntil: 0,
+      clearKind: "web",
+      intro: null,
       canvas: null,
       ctx: null,
       raf: 0,
@@ -306,7 +347,8 @@
       patterns: null,
       bannerInfo: null,
       reveal: { on: false, dirty: true, layer: null, sharp: null },
-      lock: { wasActive: false, everLocked: false, lostAt: -1e9, acquiredAt: -1e9, pendingUntil: 0, ignored: 0 },
+      lock: { wasActive: false, everLocked: false, lostAt: -1e9, acquiredAt: -1e9, pendingUntil: 0, ignored: 0, failures: 0 },
+      pause: { on: false, outside: false },
       nextPowerup: cfg.powerupEvery,
       bag: [],
       spawned: 0,
@@ -357,7 +399,32 @@
       if (g.canvas) g.canvas.style.cursor = g.state === "playing" && lockActive() ? "none" : "default";
     }
 
-    /** Debe llamarse desde un gesto del usuario (mousedown/click). */
+    /** El navegador no puede (o no quiere) capturar el ratón: no insistir ni avisar. */
+    function lockUnsupported() {
+      return (
+        !g.canvas ||
+        typeof g.canvas.requestPointerLock !== "function" ||
+        (!g.lock.everLocked && g.lock.failures >= 2)
+      );
+    }
+
+    /** Pausa solo si la bola está en juego y se juega con el ratón. */
+    function pauseEligible() {
+      return cfg.autoPause && g.state === "playing" && !waitingForLaunch() && g.inputMode === "mouse";
+    }
+
+    function pauseGame() {
+      if (g.pause.on) return;
+      g.pause.on = true;
+      g.keys.clear();
+    }
+
+    function resumeGame() {
+      g.pause.on = false;
+      g.pause.outside = false;
+    }
+
+    /** Debe llamarse desde un gesto del usuario (clic o tecla). */
     function requestLock() {
       if (!cfg.pointerLock || !g.canvas || lockActive()) return;
       if (typeof g.canvas.requestPointerLock !== "function") return;
@@ -367,10 +434,12 @@
         if (result && typeof result.catch === "function") {
           result.catch(() => {
             g.lock.pendingUntil = 0; // rechazada: vuelve el control absoluto
+            g.lock.failures++;
           });
         }
       } catch {
         g.lock.pendingUntil = 0;
+        g.lock.failures++;
         // Sin permiso o sin soporte: se sigue con el control absoluto.
       }
     }
@@ -390,11 +459,14 @@
       g.lock.pendingUntil = 0;
       if (active) {
         g.lock.everLocked = true;
+        g.lock.failures = 0;
         g.lock.acquiredAt = performance.now();
         g.mouseX = g.paddleX; // sin saltos al capturar
         g.inputMode = "mouse";
+        resumeGame();
       } else if (g.lock.wasActive) {
         g.lock.lostAt = performance.now();
+        if (pauseEligible()) pauseGame(); // se soltó el ratón (Esc, otra ventana...): pausa
       }
       g.lock.wasActive = active;
       setCursor();
@@ -491,8 +563,8 @@
       const b = newBall(
         g.paddleX,
         paddleY() - ballRadiusTarget() - 1,
-        Math.sin(angle) * cfg.ballSpeed,
-        -Math.cos(angle) * cfg.ballSpeed
+        Math.sin(angle) * g.speed,
+        -Math.cos(angle) * g.speed
       );
       // Espera pegada a la pala hasta el clic (Infinity no se agota nunca).
       b.serve = cfg.serveWaitsForClick ? Infinity : cfg.serveDelaySteps;
@@ -529,9 +601,28 @@
     }
 
     function restart() {
+      if (g.mode === "arcade") {
+        // Tras un Game Over del arcade:
+        // - en modo arcade puro vuelve al nivel 1 del arcade,
+        // - en modo web vuelve a empezar desde la web.
+        if (options.startMode === "arcade") {
+          disposeArcadeWorld();
+          g.level = 0;
+          g.speed = cfg.ballSpeed;
+          g.intro = null;
+        } else {
+          disposeArcadeWorld();
+          enterWorld(web);
+          g.mode = "web";
+          g.level = 0;
+          g.speed = cfg.ballSpeed;
+          g.intro = null;
+        }
+      }
       engine.reset();
       sceneLayer.reset();
       g.reveal.dirty = true;
+      resumeGame();
       g.score = 0;
       g.lives = cfg.maxLives;
       g.fragments = [];
@@ -541,9 +632,13 @@
       g.nextPowerup = cfg.powerupEvery;
       g.bag = [];
       resetPowerups();
-      spawnBall();
-      setCursor();
-      sfx("playMusic", "game");
+      if (options.startMode === "arcade" && arcadeAvailable()) {
+        startLevel(1);
+      } else {
+        spawnBall();
+        setCursor();
+        sfx("playMusic", "game");
+      }
     }
 
     function loseLife() {
@@ -565,6 +660,85 @@
       g.balls = [];
       g.items = [];
       g.bolts = [];
+      setCursor();
+    }
+
+    /* ---------------- Modo arcade ---------------- */
+
+    function arcadeAvailable() {
+      return cfg.arcade && WB.Arcade && WB.Destruction;
+    }
+
+    function enterWorld(world) {
+      engine = world.engine;
+      sceneLayer = world.sceneLayer;
+      image = world.image;
+      g.reveal.dirty = true;
+      g.reveal.layer = null;
+      g.reveal.sharp = null;
+    }
+
+    function disposeArcadeWorld() {
+      if (!g.arcadeWorld) return;
+      g.arcadeWorld.sceneLayer.dispose();
+      g.arcadeWorld.image.width = 0;
+      g.arcadeWorld.image.height = 0;
+      g.arcadeWorld = null;
+    }
+
+    /** Lienzo del nivel + motor + capa de escena, por la misma tubería que la captura de la web. */
+    function buildArcadeWorld(level) {
+      const ds = Math.max(1, Math.min(2, Math.ceil(window.devicePixelRatio || 1)));
+      const data = WB.Arcade.build(level, { width: W, height: H }, { scale: ds });
+      const sampler = WB.Destruction.createSampler({ image: data.canvas, stageWidth: W, stageHeight: H });
+      const eng = WB.Destruction.createEngine({
+        width: W,
+        height: H,
+        targets: data.targets,
+        sampler,
+        playAreaBottom: H - cfg.paddleBottom - cfg.paddleHeight
+      });
+      const layer = WB.Destruction.createSceneLayer({ image: data.canvas, stageWidth: W, stageHeight: H });
+      return { engine: eng, sceneLayer: layer, image: data.canvas, data };
+    }
+
+    function speedForLevel(level) {
+      return cfg.ballSpeed * Math.min(cfg.maxSpeedFactor, 1 + cfg.speedPerLevel * (level - 1));
+    }
+
+    function startLevel(level) {
+      disposeArcadeWorld();
+      g.arcadeWorld = buildArcadeWorld(level);
+      enterWorld(g.arcadeWorld);
+      g.mode = "arcade";
+      g.level = level;
+      g.speed = speedForLevel(level);
+      g.state = "playing";
+      g.fragments = [];
+      g.dust = [];
+      g.toasts = [];
+      resetPowerups();
+      spawnBall();
+      g.intro = { until: g.tick + 210, level, name: g.arcadeWorld.data.name };
+      sfx("playLevelMusic", level);
+      resumeGame();
+      setCursor();
+    }
+
+    /** Se ha destruido todo lo destruible del mundo actual. */
+    function onWorldCleared() {
+      if (!arcadeAvailable()) {
+        finishGame();
+        return;
+      }
+      g.clearKind = g.mode === "web" ? "web" : "level";
+      if (g.mode === "arcade") g.score += cfg.levelBonus;
+      g.state = "clear";
+      g.clearUntil = g.tick + cfg.clearSteps;
+      g.balls = [];
+      g.items = [];
+      g.bolts = [];
+      sfx("levelUp");
       setCursor();
     }
 
@@ -625,6 +799,16 @@
       const result = engine.hit(contact, { x, y });
       if (!result) return false;
 
+      // Ladrillo de varios golpes (plateado): aguanta y se agrieta.
+      if (result.damaged) {
+        addEffects(result.fragments);
+        sfx("explosion", 0.2);
+        if (WB.Arcade && g.arcadeWorld) {
+          WB.Arcade.paintDamage(g.arcadeWorld.data, result.target, sceneLayer.canvas.getContext("2d"), sceneLayer.scaleX);
+        }
+        return true;
+      }
+
       sceneLayer.erase(result.rects);
       addEffects(result.fragments);
       g.reveal.dirty = true;
@@ -632,13 +816,17 @@
       // Cuanto más área rompe el impacto, más larga y grave es la explosión.
       sfx("explosion", clamp(Math.sqrt(result.area) / 220 + (result.targetDestroyed ? 0.15 : 0), 0.2, 1));
 
-      g.score += cfg.scorePerRegion;
-      if (result.targetDestroyed && result.target.resistance > 1) {
-        g.score += cfg.scoreTargetBonus;
+      if (g.mode === "arcade") {
+        g.score += result.target.points || 0;
+      } else {
+        g.score += cfg.scorePerRegion;
+        if (result.targetDestroyed && result.target.resistance > 1) {
+          g.score += cfg.scoreTargetBonus;
+        }
       }
 
       if (result.targetDestroyed && engine.stats().remainingTargets === 0) {
-        finishGame();
+        onWorldCleared();
       } else {
         maybeDropItem(x, y);
       }
@@ -670,7 +858,13 @@
 
     /** Cae un objeto cada vez que la puntuación cruza un múltiplo de powerupEvery. */
     function maybeDropItem(x, y) {
-      if (cfg.powerupEvery <= 0 || g.state !== "playing") return;
+      if (g.state !== "playing") return;
+      if (g.mode === "arcade") {
+        // En el arcade los objetos caen de ladrillos al azar, no por puntuación.
+        if (cfg.arcadeDropChance > 0 && Math.random() < cfg.arcadeDropChance) spawnItem(nextItemType(), x, y);
+        return;
+      }
+      if (cfg.powerupEvery <= 0) return;
       if (g.score < g.nextPowerup) return;
       spawnItem(nextItemType(), x, y);
       g.nextPowerup = (Math.floor(g.score / cfg.powerupEvery) + 1) * cfg.powerupEvery;
@@ -803,17 +997,17 @@
       const speed = Math.hypot(b.vx, b.vy);
       if (!speed) {
         b.vx = 0;
-        b.vy = -cfg.ballSpeed;
+        b.vy = -g.speed;
         return;
       }
-      b.vx = (b.vx / speed) * cfg.ballSpeed;
-      b.vy = (b.vy / speed) * cfg.ballSpeed;
+      b.vx = (b.vx / speed) * g.speed;
+      b.vy = (b.vy / speed) * g.speed;
 
       // Evita trayectorias casi horizontales (rebote infinito entre paredes).
-      const minVy = cfg.ballSpeed * cfg.minVerticalRatio;
+      const minVy = g.speed * cfg.minVerticalRatio;
       if (Math.abs(b.vy) < minVy) {
         b.vy = (b.vy < 0 ? -1 : 1) * minVy;
-        b.vx = (b.vx < 0 ? -1 : 1) * Math.sqrt(cfg.ballSpeed ** 2 - minVy ** 2);
+        b.vx = (b.vx < 0 ? -1 : 1) * Math.sqrt(g.speed ** 2 - minVy ** 2);
       }
     }
 
@@ -862,8 +1056,8 @@
       b.y = py - b.r - 0.01;
       const offset = clamp((b.x - g.paddleX) / (g.paddleW / 2), -1, 1);
       const angle = offset * cfg.maxPaddleAngle;
-      b.vx = Math.sin(angle) * cfg.ballSpeed;
-      b.vy = -Math.cos(angle) * cfg.ballSpeed;
+      b.vx = Math.sin(angle) * g.speed;
+      b.vy = -Math.cos(angle) * g.speed;
       sfx("bounce", "paddle");
     }
 
@@ -901,7 +1095,7 @@
     }
 
     function stepBalls() {
-      const n = Math.max(1, Math.ceil(cfg.ballSpeed / cfg.maxSubstepDistance));
+      const n = Math.max(1, Math.ceil(g.speed / cfg.maxSubstepDistance));
 
       const targetR = ballRadiusTarget();
       for (const b of g.balls.slice()) {
@@ -930,6 +1124,12 @@
 
     function update() {
       g.tick++;
+      if (g.pause.on) return; // en pausa no avanza nada (ni la física ni los temporizadores)
+      if (g.state === "clear") {
+        updateEffects();
+        if (g.tick >= g.clearUntil) startLevel(g.level + 1);
+        return;
+      }
       if (g.state === "playing") {
         updatePaddle();
         updateTimers();
@@ -1028,7 +1228,7 @@
       sharp.fillStyle = "#ff1e3c";
       sharp.beginPath();
       for (const t of engine.targets) {
-        if (t.destroyed) continue;
+        if (t.destroyed || t.solid) continue;
         for (const ch of t.chunks) {
           if (!ch.alive) continue;
           for (const r of ch.rects) sharp.rect(r.x * half, r.y * half, r.w * half, r.h * half);
@@ -1046,6 +1246,15 @@
       // así los bloques grandes no tapan el contenido de la página.
       blur.globalCompositeOperation = "destination-out";
       blur.drawImage(g.reveal.sharp, 0, 0);
+      // Los sólidos (ladrillos dorados) no se pueden destruir: el halo de sus
+      // vecinos no debe teñirlos, o parecerían destruibles.
+      blur.fillStyle = "#000";
+      blur.beginPath();
+      for (const t of engine.targets) {
+        if (!t.solid) continue;
+        for (const ch of t.chunks) for (const r of ch.rects) blur.rect(r.x * half, r.y * half, r.w * half, r.h * half);
+      }
+      blur.fill();
       blur.globalCompositeOperation = "source-over";
       g.reveal.dirty = false;
     }
@@ -1065,8 +1274,8 @@
 
     /** Aviso cuando se pierde la captura del ratón a mitad de partida. */
     function drawLockPrompt(ctx) {
-      if (!cfg.pointerLock || !g.lock.everLocked || lockActive() || g.state !== "playing") return;
-      if (waitingForLaunch() || (g.tick >> 4) % 2 === 1) return;
+      if (!cfg.pointerLock || lockActive() || lockUnsupported() || g.state !== "playing") return;
+      if (g.pause.on || waitingForLaunch() || (g.tick >> 4) % 2 === 1) return;
       const text = "CLIC PARA CAPTURAR EL RATÓN";
       const px = 2;
       const tw = textWidth(text, px);
@@ -1231,6 +1440,7 @@
     function bannerSegments(ctx, px, barVariant) {
       const LABEL = "#8b98b8";
       const VALUE = "#ffffff";
+      const surf = g.mode === "arcade" ? "PROGRESO" : "SUPERFICIE";
       const adv = (str) => textAdvance(str, px);
       const wid = (str) => textWidth(str, px);
       const s = engine.stats();
@@ -1254,6 +1464,7 @@
         },
         field("PUNTOS", String(g.score).padStart(6, "0"), "#ffd166")
       ];
+      if (g.mode === "arcade") left1.push(field("NIVEL", String(g.level), "#4ade80", true));
 
       const manyLives = cfg.maxLives > 5;
       const heartsW = manyLives ? 8 * px + wid("X" + g.lives) : cfg.maxLives * 8 * px - px;
@@ -1307,10 +1518,10 @@
         const filled = Math.floor((pct / 100) * segs + 1e-9);
         left2.push({
           opt: false,
-          w: adv("SUPERFICIE ") + barW + 3 * px + wid(pct + "%"),
+          w: adv(surf + " ") + barW + 3 * px + wid(pct + "%"),
           draw: (x, y) => {
-            drawText(ctx, "SUPERFICIE", x, y, px, LABEL);
-            const bx = x + adv("SUPERFICIE ");
+            drawText(ctx, surf, x, y, px, LABEL);
+            const bx = x + adv(surf + " ");
             for (let i = 0; i < segs; i++) {
               ctx.fillStyle = i < filled ? "#ffd166" : "#243049";
               ctx.fillRect(bx + i * (segW + px), y, segW, 7 * px);
@@ -1319,10 +1530,25 @@
           }
         });
       } else {
-        left2.push(field("SUPERFICIE", pct + "%"));
+        left2.push(field(surf, pct + "%"));
       }
 
       const right2 = [];
+      if (
+        cfg.pointerLock &&
+        g.state === "playing" &&
+        !g.pause.on &&
+        !waitingForLaunch() &&
+        !lockActive() &&
+        !lockUnsupported()
+      ) {
+        const warn = (g.tick >> 4) % 2 === 0;
+        right2.push({
+          opt: true,
+          w: wid("RATÓN LIBRE"),
+          draw: (x, y) => drawText(ctx, "RATÓN LIBRE", x, y, px, warn ? "#ff4d63" : "#4a5570")
+        });
+      }
       {
         const on = g.reveal.on;
         const text = on ? "B: BLOQUES ON" : "B: VER BLOQUES";
@@ -1428,7 +1654,7 @@
 
     /** Pantalla final en espacio de pantalla, centrada en el tablero. */
     function drawOverlay(ctx) {
-      if (g.state === "playing") return;
+      if (g.state === "playing" || g.state === "clear") return;
       const v = g.view;
       const bw = W * v.scale;
       const bh = H * v.scale;
@@ -1452,10 +1678,111 @@
       const spx = fit(scoreText, v.ui === 2 ? 3 : 2);
       drawText(ctx, scoreText, cx - textWidth(scoreText, spx) / 2, cy + 6, spx, "#ffffff");
 
+      let extra = 0;
+      if (g.mode === "arcade" && g.state === "gameover") {
+        const reached = "LLEGASTE AL NIVEL " + g.level;
+        const lpx = fit(reached, v.ui === 2 ? 2 : 1);
+        drawText(ctx, reached, cx - textWidth(reached, lpx) / 2, cy + 6 + 7 * spx + 12, lpx, "#4ade80");
+        extra = 7 * lpx + 12;
+      }
+
       if ((g.tick >> 4) % 2 === 0) {
         const prompt = "CLIC O R: JUGAR - ESC: SALIR";
         const ppx = fit(prompt, v.ui === 2 ? 2 : 1);
-        drawText(ctx, prompt, cx - textWidth(prompt, ppx) / 2, cy + 6 + 7 * spx + 18, ppx, "#35d9ff");
+        drawText(ctx, prompt, cx - textWidth(prompt, ppx) / 2, cy + 6 + 7 * spx + 18 + extra, ppx, "#35d9ff");
+      }
+    }
+
+    /** Transición: web destruida → modo arcade, o nivel superado. */
+    function drawClear(ctx) {
+      if (g.state !== "clear") return;
+      const v = g.view;
+      const bw = W * v.scale;
+      const bh = H * v.scale;
+      const cx = v.offsetX + bw / 2;
+      const cy = v.offsetY + bh / 2;
+      ctx.setTransform(v.dpr, 0, 0, v.dpr, 0, 0);
+
+      ctx.fillStyle = "rgba(5, 8, 18, 0.66)";
+      ctx.fillRect(v.offsetX, v.offsetY, bw, bh);
+
+      const fit = (text, start) => {
+        let px = start;
+        while (px > 1 && textWidth(text, px) > bw - 24) px--;
+        return px;
+      };
+      const web = g.clearKind === "web";
+      const title = web ? "¡WEB DESTRUIDA!" : "NIVEL " + g.level + " SUPERADO";
+      const tpx = fit(title, v.ui === 2 ? 6 : 3);
+      drawText(ctx, title, cx - textWidth(title, tpx) / 2, cy - 7 * tpx - 14, tpx, web ? "#ffd166" : "#4ade80", "#1a2a10");
+
+      const sub = web ? "MODO ARCADE" : "+" + cfg.levelBonus + " PUNTOS";
+      const spx = fit(sub, v.ui === 2 ? 4 : 2);
+      drawText(ctx, sub, cx - textWidth(sub, spx) / 2, cy + 2, spx, "#35d9ff", "#0a4a5a");
+
+      if ((g.tick >> 3) % 2 === 0 && WB.Arcade) {
+        const next = (web ? "NIVEL 1: " : "SIGUIENTE: ") + WB.Arcade.patternFor(g.level + 1).name;
+        const npx = fit(next, v.ui === 2 ? 2 : 1);
+        drawText(ctx, next, cx - textWidth(next, npx) / 2, cy + 2 + 7 * spx + 18, npx, "#ffd166");
+      }
+    }
+
+    /** Rótulo «NIVEL n» al empezar cada nivel (mientras la bola espera). */
+    function drawIntro(ctx) {
+      // Solo mientras la bola espera: una vez lanzada, el rótulo taparía el juego.
+      if (g.mode !== "arcade" || !g.intro || g.tick >= g.intro.until || g.state !== "playing" || g.pause.on) return;
+      if (!waitingForLaunch()) return;
+      const v = g.view;
+      const bw = W * v.scale;
+      const bh = H * v.scale;
+      const cx = v.offsetX + bw / 2;
+      const cy = v.offsetY + bh * 0.7;
+      ctx.setTransform(v.dpr, 0, 0, v.dpr, 0, 0);
+
+      const fit = (text, start) => {
+        let px = start;
+        while (px > 1 && textWidth(text, px) > bw - 24) px--;
+        return px;
+      };
+      const title = "NIVEL " + g.intro.level;
+      const tpx = fit(title, v.ui === 2 ? 5 : 3);
+      drawText(ctx, title, cx - textWidth(title, tpx) / 2, cy, tpx, "#35d9ff", "#0a4a5a");
+      const name = g.intro.name;
+      const npx = fit(name, v.ui === 2 ? 3 : 2);
+      drawText(ctx, name, cx - textWidth(name, npx) / 2, cy + 7 * tpx + 12, npx, "#ffd166", "#3a2a00");
+    }
+
+    /** Pantalla de pausa (espacio de pantalla, centrada en el tablero). */
+    function drawPause(ctx) {
+      if (!g.pause.on || g.state !== "playing") return;
+      const v = g.view;
+      const bw = W * v.scale;
+      const bh = H * v.scale;
+      const cx = v.offsetX + bw / 2;
+      const cy = v.offsetY + bh / 2;
+      ctx.setTransform(v.dpr, 0, 0, v.dpr, 0, 0);
+
+      ctx.fillStyle = "rgba(5, 8, 18, 0.74)";
+      ctx.fillRect(v.offsetX, v.offsetY, bw, bh);
+
+      const fit = (text, start) => {
+        let px = start;
+        while (px > 1 && textWidth(text, px) > bw - 24) px--;
+        return px;
+      };
+      const title = "PAUSA";
+      const tpx = fit(title, v.ui === 2 ? 6 : 3);
+      drawText(ctx, title, cx - textWidth(title, tpx) / 2, cy - 7 * tpx - 14, tpx, "#35d9ff", "#0a4a5a");
+
+      if ((g.tick >> 4) % 2 === 0) {
+        const prompt = "CLIC PARA CONTINUAR";
+        const ppx = fit(prompt, v.ui === 2 ? 3 : 2);
+        drawText(ctx, prompt, cx - textWidth(prompt, ppx) / 2, cy + 4, ppx, "#ffd166");
+      }
+      if (!lockUnsupported() && cfg.pointerLock) {
+        const note = "SE CAPTURARÁ EL RATÓN DE NUEVO";
+        const npx = fit(note, v.ui === 2 ? 2 : 1);
+        drawText(ctx, note, cx - textWidth(note, npx) / 2, cy + 4 + 7 * (v.ui === 2 ? 3 : 2) + 16, npx, "#8b98b8");
       }
     }
 
@@ -1492,6 +1819,9 @@
       drawFrame(ctx);
       drawBanner(ctx);
       drawOverlay(ctx);
+      drawClear(ctx);
+      drawIntro(ctx);
+      drawPause(ctx);
     }
 
     /* ---------------- Entrada ---------------- */
@@ -1557,11 +1887,18 @@
         return;
       }
       if (key === " ") {
-        if (!event.repeat) launchBall();
+        if (!event.repeat) {
+          resumeGame();
+          requestLock(); // lanzar con teclado también captura el ratón
+          launchBall();
+        }
         return;
       }
       if (key === "r") {
-        if (!event.repeat) restart();
+        if (!event.repeat) {
+          restart();
+          requestLock();
+        }
         return;
       }
       if (key === "ArrowLeft" || key === "ArrowRight" || key === "a" || key === "d") {
@@ -1581,6 +1918,7 @@
       event.stopPropagation();
       if (event.type === "mousedown" || event.type === "pointerdown") unlockAudio();
       if (event.type === "mousedown" && event.button === 0) {
+        resumeGame();
         requestLock();
         launchBall();
       }
@@ -1590,10 +1928,12 @@
       swallow(event);
       if (event.target !== g.canvas) return;
       unlockAudio();
+      if (g.state === "clear") return; // transición de nivel: el clic no hace nada
       if (g.state !== "playing") {
         restart();
         return;
       }
+      resumeGame();
       requestLock();
       launchBall();
       if (!lockActive() && toStageY(event.clientY) >= paddleY() - 50) {
@@ -1621,6 +1961,17 @@
 
     function onBlur() {
       g.keys.clear();
+      if (!lockActive() && pauseEligible()) pauseGame();
+    }
+
+    /** El cursor salió de la ventana (p. ej. hacia otro monitor). */
+    function onMouseLeave() {
+      g.pause.outside = true;
+      if (!lockActive() && pauseEligible()) pauseGame();
+    }
+
+    function onMouseEnter() {
+      g.pause.outside = false;
     }
 
     function attach() {
@@ -1642,12 +1993,16 @@
       listen(document, "pointerlockchange", onLockChange);
       listen(document, "pointerlockerror", () => {
         g.lock.pendingUntil = 0;
+        g.lock.failures++;
       });
+      listen(document.documentElement, "mouseleave", onMouseLeave);
+      listen(document.documentElement, "mouseenter", onMouseEnter);
     }
 
     /** Pestaña oculta: el bucle se detiene, y el audio también. */
     function onVisibility() {
       sfx("setHidden", document.hidden);
+      if (document.hidden && cfg.autoPause && g.state === "playing" && !waitingForLaunch()) pauseGame();
     }
 
     /* ---------------- Ciclo de vida ---------------- */
@@ -1693,23 +2048,34 @@
       g.spawned = 0;
       g.spawnLog = [];
       g.tick = 0;
+      g.pause.on = false;
+      g.pause.outside = false;
+      g.lock.failures = 0;
       g.toasts = [];
       resetPowerups();
 
       g.audio = options.audio !== undefined ? options.audio : WB.Audio ? WB.Audio.create() : null;
       if (g.audio) g.audio.tryStart();
-      sfx("playMusic", "game");
 
       createCanvas();
       resize();
       attach();
-      spawnBall();
 
       // Que ninguna caja de texto de la página siga recibiendo teclas.
       if (document.activeElement && typeof document.activeElement.blur === "function") {
         document.activeElement.blur();
       }
-      g.raf = requestAnimationFrame(frame);
+
+      if (options.startMode === "arcade" && arcadeAvailable()) {
+        // Modo arcade puro: empieza directamente en el nivel 1, sin web.
+        g.raf = requestAnimationFrame(frame);
+        startLevel(1);
+      } else {
+        // Modo web (por defecto): destruye la página y luego entra en arcade.
+        sfx("playMusic", "game");
+        spawnBall();
+        g.raf = requestAnimationFrame(frame);
+      }
     }
 
     /** Retira canvas, listeners y animación. No toca el motor ni la capa. */
@@ -1724,6 +2090,7 @@
       removers.length = 0;
 
       releaseLock();
+      disposeArcadeWorld();
       if (g.canvas) g.canvas.remove();
       g.canvas = null;
       g.ctx = null;
@@ -1759,6 +2126,10 @@
           lives: g.lives,
           balls: g.balls.length,
           waiting: waitingForLaunch(),
+          paused: g.pause.on,
+          mode: g.mode,
+          level: g.level,
+          speed: g.speed,
           wideSeconds: Math.ceil(g.effects.wide / 60),
           laserSeconds: Math.ceil(g.effects.laser / 60),
           bigSeconds: Math.ceil(g.effects.big / 60),
@@ -1802,6 +2173,18 @@
         fire: fireLaser,
         get banner() { return g.bannerInfo; },
         get locked() { return lockActive(); },
+        get mode() { return g.mode; },
+        get level() { return g.level; },
+        get speed() { return g.speed; },
+        get world() { return g.arcadeWorld; },
+        get intro() { return g.intro; },
+        get clearUntil() { return g.clearUntil; },
+        get engine() { return engine; },
+        get sceneLayer() { return sceneLayer; },
+        startLevel,
+        forceClear: onWorldCleared,
+        get paused() { return g.pause.on; },
+        get pauseInfo() { return g.pause; },
         get tick() { return g.tick; },
         get mouseX() { return g.mouseX; },
         get lockInfo() { return g.lock; },
