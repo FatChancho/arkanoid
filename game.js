@@ -173,9 +173,9 @@
   const STEP_MS = 1000 / 60;
   const GAME_KEYS = new Set(["ArrowLeft", "ArrowRight", " ", "a", "d", "r", "m", "b"]);
 
-  const ITEM_TYPES = ["multiball", "wide", "laser", "bigball"];
-  const ITEM_COLORS = { multiball: "#ffd166", wide: "#35d9ff", laser: "#ff5d73", bigball: "#5be37d" };
-  const ITEM_LABELS = { multiball: "BOLA TRIPLE", wide: "BARRA GRANDE", laser: "LÁSER AUTOMÁTICO", bigball: "BOLA GRANDE" };
+  const ITEM_TYPES = ["multiball", "wide", "laser", "bigball", "life"];
+  const ITEM_COLORS = { multiball: "#ffd166", wide: "#35d9ff", laser: "#ff5d73", bigball: "#5be37d", life: "#ff3b4e" };
+  const ITEM_LABELS = { multiball: "BOLA TRIPLE", wide: "BARRA GRANDE", laser: "LÁSER AUTOMÁTICO", bigball: "BOLA GRANDE", life: "+VIDA" };
 
   function clamp(v, lo, hi) {
     return v < lo ? lo : v > hi ? hi : v;
@@ -837,7 +837,9 @@
 
     function nextItemType() {
       if (!g.bag.length) {
-        g.bag = ITEM_TYPES.slice();
+        // "life" only enters the bag from level 4 onward.
+        const pool = ITEM_TYPES.filter((t) => t !== "life" || g.mode !== "arcade" || g.level >= 4);
+        g.bag = pool.slice();
         for (let i = g.bag.length - 1; i > 0; i--) {
           const j = (Math.random() * (i + 1)) | 0;
           [g.bag[i], g.bag[j]] = [g.bag[j], g.bag[i]];
@@ -861,7 +863,9 @@
       if (g.state !== "playing") return;
       if (g.mode === "arcade") {
         // En el arcade los objetos caen de ladrillos al azar, no por puntuación.
-        if (cfg.arcadeDropChance > 0 && Math.random() < cfg.arcadeDropChance) spawnItem(nextItemType(), x, y);
+        if (cfg.arcadeDropChance > 0 && Math.random() < cfg.arcadeDropChance) {
+          spawnItem(nextItemType(), x, y);
+        }
         return;
       }
       if (cfg.powerupEvery <= 0) return;
@@ -894,6 +898,11 @@
       else if (type === "laser") {
         g.effects.laser = cfg.laserSteps;
         g.cooldown = 0;
+      }
+      else if (type === "life") {
+        if (g.lives < cfg.maxLives) {
+          g.lives++;
+        }
       }
       sfx("pickup");
 
@@ -1193,6 +1202,8 @@
         ctx.moveTo(10, 0);
         ctx.lineTo(6, 3.5);
         ctx.stroke();
+      } else if (type === "life") {
+        drawHeart(ctx, -3, -3, 1, "#ffffff");
       } else {
         for (const dx of [-6, 6]) {
           ctx.beginPath();
